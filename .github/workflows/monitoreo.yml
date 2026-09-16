@@ -1,0 +1,32 @@
+name: Monitoreo Diario Senado PBA
+
+on:
+  schedule:
+    # Se ejecuta de lunes a viernes a las 09:00 AM (Hora Argentina / 12:00 UTC)
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch: # Permite ejecutarlo manualmente con un clic en GitHub
+
+jobs:
+  ejecutar-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v3
+
+      - name: Configurar Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright gspread google-auth
+          playwright install --with-deps chromium
+
+      - name: Ejecutar Bot de Monitoreo
+        env:
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: python bot.py
