@@ -10,11 +10,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. PASO CLAVE: Descarga los archivos del repositorio (crea bot.py en la carpeta)
+      # 1. Descarga los archivos del repositorio
       - name: Descargar el código del repositorio
         uses: actions/checkout@v4
 
-      # 2. Configura el entorno Python
+      # 2. Configura el entorno Python (usando la versión v5 compatible con Node.js actualizado)
       - name: Configurar Python 3.10
         uses: actions/setup-python@v5
         with:
