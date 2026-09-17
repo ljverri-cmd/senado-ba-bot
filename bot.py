@@ -1,34 +1,52 @@
-import os
-import re
-import json
-import gspread
-from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright
-
-def autenticar_google_sheets():
-    creds_raw = os.environ.get("GCP_CREDENTIALS")
-    spreadsheet_id = os.environ.get("SPREADSHEET_ID")
+def main():
+    print("Iniciando monitoreo del Senado PBA...")
+    hoja = autenticar_google_sheets()
     
-    if not creds_raw or not spreadsheet_id:
-        raise ValueError("Faltan configurar los Secrets GCP_CREDENTIALS o SPREADSHEET_ID en GitHub")
+    # 1. Obtener todos los registros
+    filas = hoja.get_all_records()
+    print(f"Total de filas leídas: {len(filas)}")
 
-    # Limpiar posibles saltos de línea o comillas extraas al pegar el Secret
-    creds_raw = creds_raw.strip()
-    if creds_raw.startswith("'") and creds_raw.endswith("'"):
-        creds_raw = creds_raw[1:-1]
-    if creds_raw.startswith('"') and creds_raw.endswith('"'):
-        creds_raw = creds_raw[1:-1]
+    # 2. Detectar dinámicamente la columna 'ESTADO EN COMISIÓN CÁMARA DE ORIGEN' o similar
+    encabezados = hoja.row_values(1)
+    print("Encabezados encontrados:", encabezados)
+    
+    col_estado_num = None
+    for i, h in enumerate(encabezados, start=1):
+        if "ESTADO" in h.upper() and "ORIGEN" in h.upper():
+            col_estado_num = i
+            break
+    
+    if not col_estado_num:
+        # Fallback a columna F (6)
+        col_estado_num = 6
+    
+    print(f"Escribiendo cambios en la columna número: {col_estado_num}")
 
-    try:
-        creds_dict = json.loads(creds_raw)
-    except Exception as e:
-        raise ValueError(f"El Secret GCP_CREDENTIALS no es un JSON válido: {e}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
+        for idx, fila in enumerate(filas, start=2): # Comienza en fila 2 por encabezados
+            expediente = fila.get("EXPEDIENTE LEGISLATIVO") or fila.get("Expediente")
+            estado_actual = fila.get("ESTADO EN COMISIÓN CÁMARA DE ORIGEN") or fila.get("Estado Guardado") or ""
 
-    credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    gc = gspread.authorize(credentials)
-    return gc.open_by_key(spreadsheet_id).sheet1
+            if not expediente:
+                continue
+
+            print(f"\n--- [Fila {idx}] Expediente: {expediente} ---")
+            print(f"Estado en Sheet: '{estado_actual}'")
+            
+            nuevo_estado = consultar_estado_senado(page, expediente)
+            print(f"Estado en Web:   '{nuevo_estado}'")
+
+            if nuevo_estado:
+                if str(nuevo_estado).strip().lower() != str(estado_actual).strip().lower():
+                    print(f"🚨 ¡CAMBIO DETECTADO! Actualizando Fila {idx}, Columna {col_estado_num}...")
+                    hoja.update_cell(idx, col_estado_num, nuevo_estado)
+                    print("✅ Celda actualizada correctamente en Google Sheets.")
+                else:
+                    print("ℹ️ El estado web es idéntico al guardado en la planilla. Sin cambios.")
+            else:
+                print("⚠️ No se pudo extraer el estado desde la web para este expediente.")
+
+        browser.close()
