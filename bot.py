@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from datetime import datetime
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -34,7 +35,6 @@ except Exception as e:
     print(f"❌ Error al conectar con Google Sheets: {e}")
     exit(1)
 
-# Encabezados exactos para el cuadro consolidado
 ENCABEZADOS = [
     "EXPEDIENTE LEGISLATIVO",
     "OBJETO / CARÁTULA",
@@ -48,7 +48,6 @@ ENCABEZADOS = [
     "FECHA Y HORA ACTUALIZACIÓN"
 ]
 
-# Inicializar fila 1 si está vacía
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
@@ -75,46 +74,67 @@ def extraer_datos_expediente(page, expediente):
 
     try:
         # Ir a la web del Senado
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
-        
-        # Clic en la pestaña Proyectos si existe
-        btn_proyectos = page.locator("a:has-text('PROYECTOS'), [id*='btnProyectos']").first
-        if btn_proyectos.is_visible():
-            btn_proyectos.click()
-            page.wait_for_timeout(1000)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(2000)
 
-        # Seleccionar Tipo / Letra
-        select_tipo = page.locator("select[id*='ddlTipo']").first
-        select_tipo.select_option(value=letra)
+        # Hacemos clic en la pestaña "PROYECTOS"
+        tab_proyectos = page.get_by_text("PROYECTOS", exact=True).or_(page.locator("a:has-text('PROYECTOS'), button:has-text('PROYECTOS'), [id*='Proyectos']")).first
+        if tab_proyectos.is_visible(timeout=5000):
+            tab_proyectos.click()
+            page.wait_for_timeout(2500) # Esperar a que ASP.NET cargue la solapa de proyectos
 
-        # Cargar Número
-        input_num = page.locator("input[id*='txtNumero']").first
-        input_num.fill(numero)
+        # Localizar los controles visibles dentro del área de proyectos
+        selects = page.locator("select").all()
+        inputs = page.locator("input[type='text']").all()
 
-        # Seleccionar Período
-        select_per = page.locator("select[id*='ddlPeriodo']").first
-        try:
-            select_per.select_option(label=periodo)
-        except Exception:
-            select_per.select_option(value=periodo)
+        select_letra = None
+        for s in selects:
+            if s.is_visible():
+                select_letra = s
+                break
 
-        # Clic en Buscar
-        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], button:has-text('Buscar')").first
-        btn_buscar.click()
+        input_numero = None
+        for i in inputs:
+            if i.is_visible():
+                input_numero = i
+                break
 
-        # Esperar a que la tabla Ajax renderice
-        page.wait_for_timeout(4000)
-
-        # Extraer los datos del DOM renderizado
-        html_page = page.content()
-
-        # Si no arrojó resultados
-        if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
-            print("   ⚠️ La web del Senado no devolvió resultados para este expediente.")
+        if not select_letra or not input_numero:
+            print("   ⚠️ No se encontraron los campos del formulario de Proyectos.")
             return None
 
-        # Captura de elementos mediante evaluadores del DOM
-        objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], .caratula").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], .caratula").count() > 0 else "Sin datos"
+        # Seleccionar Letra / Tipo (E, D, F, A, etc.)
+        try:
+            select_letra.select_option(value=letra)
+        except Exception:
+            select_letra.select_option(label=letra)
+
+        # Escribir Número
+        input_numero.fill(numero)
+
+        # Seleccionar Período (segundo desplegable visible)
+        selects_visibles = [s for s in page.locator("select").all() if s.is_visible()]
+        if len(selects_visibles) > 1:
+            try:
+                selects_visibles[1].select_option(label=periodo)
+            except Exception:
+                selects_visibles[1].select_option(value=periodo)
+
+        # Clic en el botón Buscar
+        btn_buscar = page.locator("input[type='submit'], button, input[value*='Buscar']").first
+        btn_buscar.click()
+
+        # Esperar respuesta AJAX / recarga
+        page.wait_for_timeout(4000)
+
+        html_page = page.content()
+
+        if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
+            print("   ⚠️ Sin resultados para este expediente.")
+            return None
+
+        # Extraer información del DOM de resultados
+        objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula']").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula']").count() > 0 else "Sin datos"
         autor = page.locator("[id*='lblAutor']").first.text_content() if page.locator("[id*='lblAutor']").count() > 0 else "Sin datos"
         bloque = page.locator("[id*='lblBloque']").first.text_content() if page.locator("[id*='lblBloque']").count() > 0 else "Sin datos"
         
@@ -125,11 +145,9 @@ def extraer_datos_expediente(page, expediente):
         est_revisora = page.locator("[id*='lblEstadoRevisora']").first.text_content() if page.locator("[id*='lblEstadoRevisora']").count() > 0 else "N/A"
 
         media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() else "No"
-
-        from datetime import datetime
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print("   ✔ ¡Datos extraídos con éxito!")
+        print("   ✔ ¡Datos extraídos correctamente!")
 
         return [
             exp_str,
@@ -150,7 +168,7 @@ def extraer_datos_expediente(page, expediente):
 
 # 3. Leer la lista de expedientes de la Hoja 1 y volcarlos en la nueva pestaña
 sheet_origen = sh.sheet1
-expedientes_origen = sheet_origen.col_values(1)[1:] # Toma la Columna A omitiendo la fila 1 (encabezado)
+expedientes_origen = sheet_origen.col_values(1)[1:]
 
 filas_para_consolidado = []
 
@@ -172,6 +190,6 @@ with sync_playwright() as p:
 # 4. Escribir todas las filas extraídas en la pestaña consolidada
 if filas_para_consolidado:
     sheet_consolidado.append_rows(filas_para_consolidado)
-    print(f"\n🎉 ¡Proceso finalizado! Se agregaron {len(filas_para_consolidado)} registros en la pestaña 'Senado_PBA_Consolidado'.")
+    print(f"\n🎉 ¡Proceso finalizado! Se agregaron {len(filas_para_consolidado)} registros en 'Senado_PBA_Consolidado'.")
 else:
     print("\n⚠️ No se pudieron obtener datos nuevos para insertar.")
