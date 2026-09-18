@@ -2,33 +2,29 @@ name: Monitoreo Diario Senado PBA
 
 on:
   schedule:
-    - cron: '0 12 * * *' # Se ejecuta todos los días a las 09:00 hs (Argentina)
-  workflow_dispatch: # Permite ejecutarlo manualmente con un botón
+    # Se ejecuta automáticamente todos los días a las 09:00 AM (Hora Argentina)
+    - cron: '0 12 * * *'
+  workflow_dispatch: # <--- Esto habilita el botón "Run workflow" manualmente
 
 jobs:
   ejecutar-bot:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Usar la versión más reciente del checkout
       - name: Descargar el código del repositorio
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
 
-      # 2. Configurar Python usando la versión v5.3.0 o superior
       - name: Configurar Python 3.10
-        uses: actions/setup-python@v5.3.0
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 3. Instalar dependencias del bot
-- name: Instalar dependencias
+      - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           pip install gspread google-auth requests beautifulsoup4 playwright
           playwright install chromium
-           
 
-      # 4. Ejecutar el script del bot
       - name: Ejecutar Bot de Monitoreo
         env:
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
