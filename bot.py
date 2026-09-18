@@ -7,9 +7,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT COM SUBMISSÃO DIRETA SENADO PBA ---")
+print("--- 🚀 INICIANDO BOT CON ESCRITURA EN TIEMPO REAL SENADO PBA ---")
 
-# 1. Autenticação e conexão com o Google Sheets
+# 1. Autenticación y conexión a Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -29,9 +29,9 @@ try:
     except gspread.exceptions.WorksheetNotFound:
         sheet_consolidado = sh.add_worksheet(title="Senado_PBA_Consolidado", rows="1000", cols="10")
 
-    print(f"✔ Conectado com sucesso à planilha: '{sh.title}'")
+    print(f"✔ Conectado exitosamente a la planilla: '{sh.title}'")
 except Exception as e:
-    print(f"❌ Erro al conectar com Google Sheets: {e}")
+    print(f"❌ Error al conectar con Google Sheets: {e}")
     exit(1)
 
 ENCABEZADOS = [
@@ -50,13 +50,13 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Extração adaptada com submissão direta do formulário
+# 2. Extracción de datos del expediente
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
     
     if not match:
-        print(f"⚠️ Formato de expediente inválido: '{exp_str}'")
+        print(f"⚠️ Formato de expediente no válido: '{exp_str}'")
         return None
 
     letra = match.group(1).upper()
@@ -81,7 +81,7 @@ def extraer_datos_expediente(page, expediente):
 
         page.wait_for_selector(selector_numero, state="visible", timeout=15000)
 
-        # Selecionar Tipo / Letra
+        # Seleccionar Tipo / Letra
         try:
             page.locator(selector_tipo).first.select_option(value=letra)
         except Exception:
@@ -90,10 +90,10 @@ def extraer_datos_expediente(page, expediente):
             except Exception:
                 pass
 
-        # Preencher o número
+        # Cargar Número
         page.locator(selector_numero).first.fill(numero)
 
-        # Selecionar o Período
+        # Seleccionar Período
         if page.locator(selector_periodo).count() > 0:
             try:
                 page.locator(selector_periodo).first.select_option(label=periodo)
@@ -103,7 +103,7 @@ def extraer_datos_expediente(page, expediente):
                 except Exception:
                     pass
 
-        # Submeter formulário via JavaScript ou através de clique genérico
+        # Disparar búsqueda por Enter o clic
         try:
             btn = page.locator("a[id*='btnBuscar'], input[id*='btnBuscar'], button[id*='btnBuscar'], .btn-buscar").first
             if btn.is_visible():
@@ -113,16 +113,14 @@ def extraer_datos_expediente(page, expediente):
         except Exception:
             page.locator(selector_numero).first.press("Enter")
 
-        # Aguardar processamento da resposta AJAX
         page.wait_for_timeout(4000)
 
         html_page = page.content()
 
         if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
-            print("   ⚠️ Nenhum resultado encontrado para este expediente.")
+            print("   ⚠️ No se encontraron resultados para este expediente.")
             return None
 
-        # Leitura das informações retornadas na página
         objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").count() > 0 else "Sin datos"
         autor = page.locator("[id*='lblAutor']").first.text_content() if page.locator("[id*='lblAutor']").count() > 0 else "Sin datos"
         bloque = page.locator("[id*='lblBloque']").first.text_content() if page.locator("[id*='lblBloque']").count() > 0 else "Sin datos"
@@ -136,7 +134,7 @@ def extraer_datos_expediente(page, expediente):
         media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print("   ✔ Dados extraídos com sucesso!")
+        print("   ✔ ¡Datos extraídos correctamente!")
 
         return [
             exp_str,
@@ -152,14 +150,14 @@ def extraer_datos_expediente(page, expediente):
         ]
 
     except Exception as e:
-        print(f"   ❌ Erro ao processar {exp_str}: {e}")
+        print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Leitura e atualização da planilha
+# 3. Lectura e Inserción Inmediata por Fila (Instant Write)
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
-filas_para_consolidado = []
+cont_agregados = 0
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -172,12 +170,11 @@ with sync_playwright() as p:
         if exp.strip():
             datos = extraer_datos_expediente(page, exp)
             if datos:
-                filas_para_consolidado.append(datos)
+                # Se guarda inmediatamente la fila en Google Sheets
+                sheet_consolidado.append_row(datos)
+                cont_agregados += 1
+                print(f"   💾 Fila guardada inmediatamente en 'Senado_PBA_Consolidado'")
 
     browser.close()
 
-if filas_para_consolidado:
-    sheet_consolidado.append_rows(filas_para_consolidado)
-    print(f"\n🎉 Processo concluído! {len(filas_para_consolidado)} registros adicionados em 'Senado_PBA_Consolidado'.")
-else:
-    print("\n⚠️ Nenhum registro novo obtido.")
+print(f"\n🎉 ¡Proceso finalizado! Se guardaron {cont_agregados} filas en tiempo real.")
