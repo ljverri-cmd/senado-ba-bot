@@ -1,14 +1,14 @@
 import os
 import json
 import re
-import requests
-from bs4 import BeautifulSoup
+
 import gspread
 from google.oauth2.service_account import Credentials
+from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO EXTRACCIÓN Y COMPILACIÓN DE PROYECTOS PBA ---")
+print("--- 🚀 INICIANDO BOT COMPLETO Y EXTRACCIÓN REAL SENADO PBA ---")
 
-# 1. Autenticación en Google Sheets
+# 1. Autenticación y preparación de Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -23,117 +23,155 @@ try:
 
     sh = client.open_by_key(spreadsheet_id)
     
-    # Crear o abrir la pestaña "Senado_PBA_Consolidado"
+    # Crear o seleccionar la pestaña de consolidado
     try:
-        sheet = sh.worksheet("Senado_PBA_Consolidado")
+        sheet_consolidado = sh.worksheet("Senado_PBA_Consolidado")
     except gspread.exceptions.WorksheetNotFound:
-        sheet = sh.add_worksheet(title="Senado_PBA_Consolidado", rows="2000", cols="10")
+        sheet_consolidado = sh.add_worksheet(title="Senado_PBA_Consolidado", rows="1000", cols="10")
 
-    print(f"✔ Conectado a la planilla: '{sh.title}' | Hoja: 'Senado_PBA_Consolidado'")
+    print(f"✔ Conectado exitosamente a la planilla: '{sh.title}'")
 except Exception as e:
-    print(f"❌ Error de autenticación/Google Sheets: {e}")
+    print(f"❌ Error al conectar con Google Sheets: {e}")
     exit(1)
 
-# 2. Encabezados exactos del cuadro
+# Encabezados exactos para el cuadro consolidado
 ENCABEZADOS = [
     "EXPEDIENTE LEGISLATIVO",
-    "OBJETO",
+    "OBJETO / CARÁTULA",
     "AUTOR DEL PROYECTO",
     "BLOQUE",
-    "COMISIONES ASIGNADAS CÁMARA DE ORIGEN",
-    "ESTADO EN COMISIÓN CÁMARA DE ORIGEN",
+    "COMISIONES ASIGNADAS CÁMARA ORIGEN",
+    "ESTADO EN COMISIÓN CÁMARA ORIGEN",
     "COMISIONES ASIGNADAS CÁMARA REVISORA",
     "ESTADO EN COMISIÓN CÁMARA REVISORA",
     "MEDIA SANCIÓN",
-    "FECHA ACTUALIZACIÓN"
+    "FECHA Y HORA ACTUALIZACIÓN"
 ]
 
-# Inicializar/Asegurar la Fila 1 de la hoja
-if not sheet.row_values(1):
-    sheet.append_row(ENCABEZADOS)
+# Inicializar fila 1 si está vacía
+if not sheet_consolidado.row_values(1):
+    sheet_consolidado.append_row(ENCABEZADOS)
 
-# 3. Función de extracción y parseo detallado del portal del Senado
-def extraer_detalle_senado(expediente):
+# 2. Función de Scraping interactivo con Playwright
+def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
     
     if not match:
+        print(f"⚠️ Formato de expediente no válido: '{exp_str}'")
         return None
 
     letra = match.group(1).upper()
     numero = match.group(2)
     periodo_raw = match.group(3)
-    periodo = f"20{periodo_raw}" if len(periodo_raw) == 2 else periodo_raw
 
-    session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    url_base = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
+    if "-" in periodo_raw and len(periodo_raw) == 5:
+        p1, p2 = periodo_raw.split("-")
+        periodo = f"20{p1}-20{p2}"
+    else:
+        periodo = periodo_raw
+
+    print(f"\n🔎 Consultando web -> Letra: '{letra}', Número: '{numero}', Período: '{periodo}'")
 
     try:
-        resp_get = session.get(url_base, headers=headers, timeout=20)
-        soup_get = BeautifulSoup(resp_get.text, 'html.parser')
+        # Ir a la web del Senado
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        
+        # Clic en la pestaña Proyectos si existe
+        btn_proyectos = page.locator("a:has-text('PROYECTOS'), [id*='btnProyectos']").first
+        if btn_proyectos.is_visible():
+            btn_proyectos.click()
+            page.wait_for_timeout(1000)
 
-        viewstate = soup_get.find("input", {"id": "__VIEWSTATE"})
-        eventval = soup_get.find("input", {"id": "__EVENTVALIDATION"})
+        # Seleccionar Tipo / Letra
+        select_tipo = page.locator("select[id*='ddlTipo']").first
+        select_tipo.select_option(value=letra)
 
-        payload = {
-            "__VIEWSTATE": viewstate["value"] if viewstate else "",
-            "__EVENTVALIDATION": eventval["value"] if eventval else "",
-            "ctl00$ContentPlaceHolder1$ddlTipoP": letra,
-            "ctl00$ContentPlaceHolder1$txtNumeroP": numero,
-            "ctl00$ContentPlaceHolder1$ddlPeriodoP": periodo,
-            "ctl00$ContentPlaceHolder1$btnBuscarP": "Buscar"
-        }
+        # Cargar Número
+        input_num = page.locator("input[id*='txtNumero']").first
+        input_num.fill(numero)
 
-        resp_post = session.post(url_base, data=payload, headers=headers, timeout=20)
-        soup_post = BeautifulSoup(resp_post.text, 'html.parser')
+        # Seleccionar Período
+        select_per = page.locator("select[id*='ddlPeriodo']").first
+        try:
+            select_per.select_option(label=periodo)
+        except Exception:
+            select_per.select_option(value=periodo)
 
-        # Extraer campos de la vista detallada
-        objeto = soup_post.find(id=re.compile(r'lblSumario|lblObjeto'))
-        autor = soup_post.find(id=re.compile(r'lblAutor'))
-        bloque = soup_post.find(id=re.compile(r'lblBloque'))
-        comisiones_origen = soup_post.find(id=re.compile(r'lblComisionesOrigen'))
-        estado_origen = soup_post.find(id=re.compile(r'lblEstadoOrigen|lblEstado'))
-        comisiones_revisora = soup_post.find(id=re.compile(r'lblComisionesRevisora'))
-        estado_revisora = soup_post.find(id=re.compile(r'lblEstadoRevisora'))
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in resp_post.text.upper() else "No"
+        # Clic en Buscar
+        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], button:has-text('Buscar')").first
+        btn_buscar.click()
+
+        # Esperar a que la tabla Ajax renderice
+        page.wait_for_timeout(4000)
+
+        # Extraer los datos del DOM renderizado
+        html_page = page.content()
+
+        # Si no arrojó resultados
+        if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
+            print("   ⚠️ La web del Senado no devolvió resultados para este expediente.")
+            return None
+
+        # Captura de elementos mediante evaluadores del DOM
+        objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], .caratula").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], .caratula").count() > 0 else "Sin datos"
+        autor = page.locator("[id*='lblAutor']").first.text_content() if page.locator("[id*='lblAutor']").count() > 0 else "Sin datos"
+        bloque = page.locator("[id*='lblBloque']").first.text_content() if page.locator("[id*='lblBloque']").count() > 0 else "Sin datos"
+        
+        com_origen = page.locator("[id*='lblComisionesOrigen']").first.text_content() if page.locator("[id*='lblComisionesOrigen']").count() > 0 else "Sin asignación"
+        est_origen = page.locator("[id*='lblEstadoOrigen'], [id*='lblEstado']").first.text_content() if page.locator("[id*='lblEstadoOrigen'], [id*='lblEstado']").count() > 0 else "En Estudio"
+        
+        com_revisora = page.locator("[id*='lblComisionesRevisora']").first.text_content() if page.locator("[id*='lblComisionesRevisora']").count() > 0 else "N/A"
+        est_revisora = page.locator("[id*='lblEstadoRevisora']").first.text_content() if page.locator("[id*='lblEstadoRevisora']").count() > 0 else "N/A"
+
+        media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() else "No"
 
         from datetime import datetime
-        fecha_act = datetime.now().strftime("%Y-%m-%d %H:%M")
+        fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        print("   ✔ ¡Datos extraídos con éxito!")
 
         return [
             exp_str,
-            objeto.text.strip() if objeto else "No especificado",
-            autor.text.strip() if autor else "Sin dato",
-            bloque.text.strip() if bloque else "Sin dato",
-            comisiones_origen.text.strip() if comisiones_origen else "Sin asignación",
-            estado_origen.text.strip() if estado_origen else "En Estudio",
-            comisiones_revisora.text.strip() if comisiones_revisora else "N/A",
-            estado_revisora.text.strip() if estado_revisora else "N/A",
+            objeto.strip() if objeto else "Sin datos",
+            autor.strip() if autor else "Sin datos",
+            bloque.strip() if bloque else "Sin datos",
+            com_origen.strip() if com_origen else "Sin asignación",
+            est_origen.strip() if est_origen else "En Estudio",
+            com_revisora.strip() if com_revisora else "N/A",
+            est_revisora.strip() if est_revisora else "N/A",
             media_sancion,
             fecha_act
         ]
 
-    except Exception as err:
-        print(f"❌ Error consultando {exp_str}: {err}")
+    except Exception as e:
+        print(f"   ❌ Error al raspar la página: {e}")
         return None
 
-# 4. Procesar lista de expedientes y volcar a Google Sheets
-hoja_principal = sh.sheet1
-expedientes = hoja_principal.col_values(1)[1:] # Asume expedientes en Columna A
+# 3. Leer la lista de expedientes de la Hoja 1 y volcarlos en la nueva pestaña
+sheet_origen = sh.sheet1
+expedientes_origen = sheet_origen.col_values(1)[1:] # Toma la Columna A omitiendo la fila 1 (encabezado)
 
-filas_a_insertar = []
-for exp in expedientes:
-    if exp.strip():
-        print(f"🔎 Procesando expediente: {exp}")
-        datos_fila = extraer_detalle_senado(exp)
-        if datos_fila:
-            filas_a_insertar.append(datos_fila)
+filas_para_consolidado = []
 
-if filas_a_insertar:
-    sheet.append_rows(filas_a_insertar)
-    print(f"✔ Se insertaron {len(filas_a_insertar)} filas formateadas en 'Senado_PBA_Consolidado'.")
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    page = context.new_page()
 
-print("--- 🏁 PROCESO FINALIZADO ---")
+    for exp in expedientes_origen:
+        if exp.strip():
+            datos = extraer_datos_expediente(page, exp)
+            if datos:
+                filas_para_consolidado.append(datos)
+
+    browser.close()
+
+# 4. Escribir todas las filas extraídas en la pestaña consolidada
+if filas_para_consolidado:
+    sheet_consolidado.append_rows(filas_para_consolidado)
+    print(f"\n🎉 ¡Proceso finalizado! Se agregaron {len(filas_para_consolidado)} registros en la pestaña 'Senado_PBA_Consolidado'.")
+else:
+    print("\n⚠️ No se pudieron obtener datos nuevos para insertar.")
