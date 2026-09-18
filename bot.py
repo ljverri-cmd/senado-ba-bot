@@ -7,9 +7,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT CON NAVEGACIÓN Y APERTURA DE EXPEDIENTE SENADO PBA ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (CAPTURA POR POSTBACK E GRIDVIEW) ---")
 
-# 1. Autenticación y conexión con Google Sheets
+# 1. Autenticação e conexão com Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -50,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Extracción de datos ingresando al detalle del resultado
+# 2. Extractor de datos con manejo de detalles y PostBack
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -72,71 +72,66 @@ def extraer_datos_expediente(page, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        # Cargar el buscador oficial
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(1000)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(1500)
 
-        # Seleccionar la pestaña/radiobutton de "Proyectos" si existe
-        rdb_proyectos = page.locator("input[value*='Proyecto'], input[id*='rdbProyecto'], label:has-text('Proyectos')")
-        if rdb_proyectos.count() > 0:
+        # Campos de formulario
+        input_numero = page.locator("input[id*='txtNumero'], input[name*='Numero']").first
+        input_numero.wait_for(state="visible", timeout=15000)
+
+        select_tipo = page.locator("select[id*='ddlTipo'], select[name*='Tipo']").first
+        if select_tipo.count() > 0:
             try:
-                rdb_proyectos.first.click()
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
-
-        # Llenar selectores del formulario
-        sec_numero = page.locator("input[id*='txtNumero'], input[name*='txtNumero']").first
-        sec_numero.wait_for(state="visible", timeout=10000)
-        sec_numero.fill(numero)
-
-        sec_tipo = page.locator("select[id*='ddlTipo'], select[name*='ddlTipo']").first
-        if sec_tipo.count() > 0:
-            try:
-                sec_tipo.select_option(value=letra)
+                select_tipo.select_option(value=letra)
             except Exception:
                 try:
-                    sec_tipo.select_option(label=letra)
+                    select_tipo.select_option(label=letra)
                 except Exception:
                     pass
 
-        sec_periodo = page.locator("select[id*='ddlPeriodo'], select[name*='ddlPeriodo']").first
-        if sec_periodo.count() > 0:
+        input_numero.fill(numero)
+
+        select_periodo = page.locator("select[id*='ddlPeriodo'], select[name*='Periodo']").first
+        if select_periodo.count() > 0:
             try:
-                sec_periodo.select_option(label=periodo)
+                select_periodo.select_option(label=periodo)
             except Exception:
                 try:
-                    sec_periodo.select_option(value=periodo)
+                    select_periodo.select_option(value=periodo)
                 except Exception:
                     pass
 
-        # Clic explícito en Buscar
-        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[id*='btnBuscar'], a[id*='btnBuscar'], button:has-text('Buscar')").first
-        btn_buscar.click()
+        # Disparar búsqueda
+        print("   🚀 Enviando formulario de búsqueda...")
+        input_numero.press("Enter")
 
-        # Esperar PostBack y renderizado de la grilla de resultados
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2500)
 
         html_page = page.content()
 
-        if "No se encontraron" in html_page or "Sin resultados" in html_page:
+        if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
             print("   ⚠️ No se encontraron resultados para este expediente.")
             return None
 
-        # Si aparece la grilla de resultados, hacer clic en el expediente para abrir el detalle
-        enlace_expediente = page.locator("table td a, .grid-view a, a[href*='javascript']").first
-        if enlace_expediente.count() > 0:
-            print("   📄 Abriendo el detalle del expediente...")
-            enlace_expediente.click()
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(3000)
+        # Intentar hacer clic en el enlace del expediente si existe la grilla
+        # Usamos timeout=5000 dentro de try/except para evitar bloqueos de 30s
+        seletor_link = "table[id*='Grid'] a, table[id*='grd'] a, .table a, a[id*='lnk'], a[id*='btn']"
+        link_resultado = page.locator(seletor_link).first
 
-        # Capturar el texto completo del contenedor del resultado o de toda la página
-        texto_pagina = page.inner_text("body")
+        try:
+            if link_resultado.is_visible(timeout=5000):
+                print("   📄 Abriendo ficha de detalle...")
+                link_resultado.click(timeout=5000)
+                page.wait_for_load_state("networkidle")
+                page.wait_for_timeout(2000)
+        except Exception:
+            print("   ℹ️ No fue necesario hacer clic en el detalle (información presente en la grilla principal).")
 
-        # Expresiones regulares para extraer los campos clave desde el texto plano renderizado
-        def buscar_campo(patrones, texto):
+        # Captura de texto del cuerpo
+        texto_cuerpo = page.inner_text("body")
+
+        def buscar_regex(patrones, texto):
             for pat in patrones:
                 m = re.search(f"{pat}[:\\s]+([^\\n\\r]+)", texto, re.IGNORECASE)
                 if m:
@@ -145,17 +140,15 @@ def extraer_datos_expediente(page, expediente):
                         return val
             return None
 
-        objeto = buscar_campo(["Objeto", "Sumario", "Carátula", "Extracto", "Proyecto"], texto_pagina)
-        autor = buscar_campo(["Autor", "Iniciador", "Firmante", "Senador"], texto_pagina)
-        bloque = buscar_campo(["Bloque", "Partido", "Bloque Político"], texto_pagina)
-        com_origen = buscar_campo(["Comisión", "Comisiones", "Giro a comisión"], texto_pagina)
-        est_origen = buscar_campo(["Estado", "Estado en comisión", "Situación"], texto_pagina)
-        
-        # Fallback si no se encontró con Regex
+        objeto = buscar_regex(["Objeto", "Sumario", "Carátula", "Extracto", "Proyecto"], texto_cuerpo)
+        autor = buscar_regex(["Autor", "Iniciador", "Firmante", "Senador"], texto_cuerpo)
+        bloque = buscar_regex(["Bloque", "Partido", "Bloque Político"], texto_cuerpo)
+        com_origen = buscar_regex(["Comisión", "Comisiones", "Giro a comisión"], texto_cuerpo)
+        est_origen = buscar_regex(["Estado", "Estado en comisión", "Situación"], texto_cuerpo)
+
         if not objeto:
-            # Extraer los primeros párrafos útiles
-            lineas = [l.strip() for l in texto_pagina.split("\n") if len(l.strip()) > 20]
-            objeto = lineas[0] if lineas else "Ver ficha en la web"
+            lineas_validas = [linea.strip() for linea in texto_cuerpo.split("\n") if len(linea.strip()) > 25]
+            objeto = lineas_validas[0] if lineas_validas else "Ver ficha en la web"
 
         objeto = objeto if objeto else "Ver ficha en la web"
         autor = autor if autor else "Sin datos"
@@ -165,10 +158,10 @@ def extraer_datos_expediente(page, expediente):
 
         com_revisora = "N/A"
         est_revisora = "N/A"
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in texto_pagina.upper() else "No"
+        media_sancion = "Sí" if "MEDIA SANCIÓN" in texto_cuerpo.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print(f"   ✔ Extraído: Objeto='{objeto[:40]}...', Autor='{autor}'")
+        print(f"   ✔ Extracción exitosa: Objeto='{objeto[:35]}...', Autor='{autor}'")
 
         return [
             exp_str,
@@ -187,7 +180,7 @@ def extraer_datos_expediente(page, expediente):
         print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Bucle de ejecución y guardado inmediato
+# 3. Guardado en Google Sheets
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -211,4 +204,4 @@ with sync_playwright() as p:
 
     browser.close()
 
-print(f"\n🎉 ¡Proceso finalizado! Se actualizaron {cont_agregados} filas en Google Sheets.")
+print(f"\n🎉 ¡Proceso finalizado! Se procesaron {cont_agregados} expedientes.")
