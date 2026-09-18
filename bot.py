@@ -27,7 +27,7 @@ except Exception as e:
     print(f"❌ Error al abrir Google Sheets: {e}")
     exit(1)
 
-# 2. Función de Scraping adaptada a IFrames y ASP.NET
+# 2. Función de Scraping adaptada a la interacción de pestañas del Senado PBA
 def consultar_estado_senado(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -50,67 +50,64 @@ def consultar_estado_senado(page, expediente):
 
     try:
         # Cargar el sitio principal
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(2000)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
+        
+        # PASO CLAVE: Forzar clic en la pestaña "Proyectos" para renderizar el formulario
+        tab_proyectos = page.locator("text=/proyectos/i, a:has-text('PROYECTOS'), [id*='btnProyectos']").first
+        if tab_proyectos.is_visible(timeout=5000):
+            tab_proyectos.click()
+            page.wait_for_timeout(1500)
 
-        # Buscar el marco (frame) correcto si la consulta está en un iframe
-        target = page
-        for frame in page.frames:
-            if "leyes" in frame.url.lower() or "proyectos" in frame.url.lower() or frame.locator("select, input").count() > 0:
-                target = frame
-                break
+        # Esperar a que aparezcan los desplegables tras el PostBack
+        select_letra = page.locator("select").first
+        select_letra.wait_for(state="visible", timeout=20000)
 
-        # Buscar cualquier select para el Tipo/Letra
-        select_letra = target.locator("select").first
-        select_letra.wait_for(state="visible", timeout=15000)
-
-        # Seleccionar la Letra
+        # Seleccionar Tipo/Letra (E, D, F, etc.)
         try:
             select_letra.select_option(value=letra)
         except Exception:
             select_letra.select_option(label=letra)
 
-        # Buscar la caja de texto numérica
-        input_num = target.locator("input[type='text']").first
+        # Completar Número de expediente
+        input_num = page.locator("input[type='text']").first
         input_num.fill(numero)
 
-        # Buscar el desplegable de período
-        selects = target.locator("select").all()
+        # Seleccionar Período (segundo desplegable)
+        selects = page.locator("select").all()
         if len(selects) > 1:
             try:
                 selects[1].select_option(label=periodo)
             except Exception:
                 selects[1].select_option(value=periodo)
 
-        # Buscar el botón de búsqueda
-        btn_buscar = target.locator("input[type='submit'], button, input[type='button']").first
+        # Clic en el botón Buscar
+        btn_buscar = page.locator("input[type='submit'], button, input[value*='Buscar']").first
         btn_buscar.click()
 
-        # Esperar la recarga dinámica por AJAX/ASP.NET
-        page.wait_for_timeout(4000)
+        # Esperar que carguen los resultados
+        page.wait_for_timeout(3500)
 
-        html_respuesta = target.content()
+        html_respuesta = page.content()
 
-        # Capturar el estado con expresiones regulares
+        # Regex para capturar los estados habituales
         patron = r'(En Estudio|Aprobado c\/Modificaciones|Aprobado|Archivado|Media Sanción|En Comisión|Sancionado|Promulgada)'
         match_estado = re.search(patron, html_respuesta, re.IGNORECASE)
 
         if match_estado:
             return match_estado.group(0).strip()
         
-        print("   ⚠️ La búsqueda finalizó pero no se encontró la etiqueta del estado.")
+        print("   ⚠️ No se encontró estado visible en los resultados.")
         return None
 
     except Exception as err:
-        print(f"   ❌ Error de navegación en el portal: {err}")
+        print(f"   ❌ Error durante la consulta: {err}")
         return None
 
 # 3. Procesamiento de filas
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        viewport={'width': 1280, 'height': 800}
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     page = context.new_page()
 
@@ -118,6 +115,7 @@ with sync_playwright() as p:
         expediente = None
         estado_guardado = None
 
+        # Detectar columnas automáticamente sin importar variaciones de nombre
         for clave, valor in fila.items():
             clave_lower = str(clave).lower().strip()
             if "expediente" in clave_lower:
@@ -136,6 +134,8 @@ with sync_playwright() as p:
             print(f"   🌐 Estado en web: '{estado_web}'")
             if str(estado_web).strip().lower() != str(estado_guardado).strip().lower():
                 print(f"   🚨 ¡CAMBIO DETECTADO! Actualizando fila {idx}...")
+                
+                # Modifica el número '6' por la posición numérica exacta de tu columna de Estado (A=1, B=2, C=3, D=4, E=5, F=6...)
                 sheet.update_cell(idx, 6, estado_web)
                 print("   ✔ Fila actualizada en Google Sheets.")
             else:
