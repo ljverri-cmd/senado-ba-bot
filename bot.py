@@ -7,9 +7,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT COMPLETO Y EXTRACCIÓN REAL SENADO PBA ---")
+print("--- 🚀 INICIANDO BOT CON SELECTORES EXACTOS SENADO PBA ---")
 
-# 1. Autenticación y preparación de Google Sheets
+# 1. Autenticación en Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -24,7 +24,6 @@ try:
 
     sh = client.open_by_key(spreadsheet_id)
     
-    # Crear o seleccionar la pestaña de consolidado
     try:
         sheet_consolidado = sh.worksheet("Senado_PBA_Consolidado")
     except gspread.exceptions.WorksheetNotFound:
@@ -51,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Función de Scraping interactivo con Playwright
+# 2. Scraping especializado utilizando los IDs nativos de ASP.NET
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -70,71 +69,55 @@ def extraer_datos_expediente(page, expediente):
     else:
         periodo = periodo_raw
 
-    print(f"\n🔎 Consultando web -> Letra: '{letra}', Número: '{numero}', Período: '{periodo}'")
+    print(f"\n🔎 Consultando expediente: {exp_str} -> Tipo: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        # Ir a la web del Senado
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(1000)
+
+        # Activar el panel de proyectos mediante __doPostBack o clic directo en el Tab
+        try:
+            page.evaluate("__doPostBack('ctl00$ContentPlaceHolder1$btnProyectos','')")
+        except Exception:
+            page.locator("a[id*='btnProyectos'], input[id*='btnProyectos']").first.click()
+
         page.wait_for_timeout(2000)
 
-        # Hacemos clic en la pestaña "PROYECTOS"
-        tab_proyectos = page.get_by_text("PROYECTOS", exact=True).or_(page.locator("a:has-text('PROYECTOS'), button:has-text('PROYECTOS'), [id*='Proyectos']")).first
-        if tab_proyectos.is_visible(timeout=5000):
-            tab_proyectos.click()
-            page.wait_for_timeout(2500) # Esperar a que ASP.NET cargue la solapa de proyectos
+        # Identificadores precisos de los controles ASP.NET del formulario Proyectos
+        id_tipo = "select[name*='ddlTipoP'], select[id*='ddlTipoP']"
+        id_numero = "input[name*='txtNumeroP'], input[id*='txtNumeroP']"
+        id_periodo = "select[name*='ddlPeriodoP'], select[id*='ddlPeriodoP']"
+        id_buscar = "input[name*='btnBuscarP'], input[id*='btnBuscarP'], button[id*='btnBuscarP']"
 
-        # Localizar los controles visibles dentro del área de proyectos
-        selects = page.locator("select").all()
-        inputs = page.locator("input[type='text']").all()
+        # Esperar a que el selector de tipo de proyecto sea visible en el DOM
+        page.wait_for_selector(id_tipo, state="visible", timeout=15000)
 
-        select_letra = None
-        for s in selects:
-            if s.is_visible():
-                select_letra = s
-                break
+        # Seleccionar Tipo / Letra (Ej: E, D, F)
+        page.locator(id_tipo).first.select_option(value=letra)
 
-        input_numero = None
-        for i in inputs:
-            if i.is_visible():
-                input_numero = i
-                break
+        # Cargar Número
+        page.locator(id_numero).first.fill(numero)
 
-        if not select_letra or not input_numero:
-            print("   ⚠️ No se encontraron los campos del formulario de Proyectos.")
-            return None
-
-        # Seleccionar Letra / Tipo (E, D, F, A, etc.)
+        # Seleccionar Período
         try:
-            select_letra.select_option(value=letra)
+            page.locator(id_periodo).first.select_option(label=periodo)
         except Exception:
-            select_letra.select_option(label=letra)
+            page.locator(id_periodo).first.select_option(value=periodo)
 
-        # Escribir Número
-        input_numero.fill(numero)
+        # Disparar búsqueda
+        page.locator(id_buscar).first.click()
 
-        # Seleccionar Período (segundo desplegable visible)
-        selects_visibles = [s for s in page.locator("select").all() if s.is_visible()]
-        if len(selects_visibles) > 1:
-            try:
-                selects_visibles[1].select_option(label=periodo)
-            except Exception:
-                selects_visibles[1].select_option(value=periodo)
-
-        # Clic en el botón Buscar
-        btn_buscar = page.locator("input[type='submit'], button, input[value*='Buscar']").first
-        btn_buscar.click()
-
-        # Esperar respuesta AJAX / recarga
+        # Esperar a que la tabla AJAX procese los resultados
         page.wait_for_timeout(4000)
 
         html_page = page.content()
 
         if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
-            print("   ⚠️ Sin resultados para este expediente.")
+            print("   ⚠️ No se encontraron resultados para este expediente.")
             return None
 
-        # Extraer información del DOM de resultados
-        objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula']").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula']").count() > 0 else "Sin datos"
+        # Extracción de los valores de las etiquetas devueltas
+        objeto = page.locator("[id*='lblSumario'], [id*='lblObjeto']").first.text_content() if page.locator("[id*='lblSumario'], [id*='lblObjeto']").count() > 0 else "Sin datos"
         autor = page.locator("[id*='lblAutor']").first.text_content() if page.locator("[id*='lblAutor']").count() > 0 else "Sin datos"
         bloque = page.locator("[id*='lblBloque']").first.text_content() if page.locator("[id*='lblBloque']").count() > 0 else "Sin datos"
         
@@ -147,7 +130,7 @@ def extraer_datos_expediente(page, expediente):
         media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print("   ✔ ¡Datos extraídos correctamente!")
+        print("   ✔ ¡Datos extraídos con éxito!")
 
         return [
             exp_str,
@@ -163,10 +146,10 @@ def extraer_datos_expediente(page, expediente):
         ]
 
     except Exception as e:
-        print(f"   ❌ Error al raspar la página: {e}")
+        print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Leer la lista de expedientes de la Hoja 1 y volcarlos en la nueva pestaña
+# 3. Lectura de expediente y volcado de resultados
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -187,9 +170,8 @@ with sync_playwright() as p:
 
     browser.close()
 
-# 4. Escribir todas las filas extraídas en la pestaña consolidada
 if filas_para_consolidado:
     sheet_consolidado.append_rows(filas_para_consolidado)
-    print(f"\n🎉 ¡Proceso finalizado! Se agregaron {len(filas_para_consolidado)} registros en 'Senado_PBA_Consolidado'.")
+    print(f"\n🎉 ¡Proceso finalizado! Se agregaron {len(filas_para_consolidado)} filas en 'Senado_PBA_Consolidado'.")
 else:
-    print("\n⚠️ No se pudieron obtener datos nuevos para insertar.")
+    print("\n⚠️ No se obtuvieron registros nuevos.")
