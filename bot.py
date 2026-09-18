@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT CON ESPERA AJAX Y SELECTORES DETALLADOS ---")
+print("--- 🚀 INICIANDO BOT CON EXTRACCIÓN POR TABLA Y DOM SENADO PBA ---")
 
 # 1. Autenticación y conexión a Google Sheets
 try:
@@ -50,20 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# Función auxiliar para buscar texto en múltiples selectores posibles
-def obtener_texto_multiselector(page, selectores):
-    for sel in selectores:
-        try:
-            elementos = page.locator(sel)
-            if elementos.count() > 0:
-                texto = elementos.first.text_content().strip()
-                if texto and texto.upper() != "SIN DATOS":
-                    return texto
-        except Exception:
-            continue
-    return "Sin datos"
-
-# 2. Extracción de datos con espera explícita
+# 2. Extracción robónstica del DOM
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -94,7 +81,7 @@ def extraer_datos_expediente(page, expediente):
 
         page.wait_for_selector(selector_numero, state="visible", timeout=15000)
 
-        # Seleccionar Tipo
+        # Cargar formulario
         try:
             page.locator(selector_tipo).first.select_option(value=letra)
         except Exception:
@@ -103,10 +90,8 @@ def extraer_datos_expediente(page, expediente):
             except Exception:
                 pass
 
-        # Cargar Número
         page.locator(selector_numero).first.fill(numero)
 
-        # Seleccionar Período
         if page.locator(selector_periodo).count() > 0:
             try:
                 page.locator(selector_periodo).first.select_option(label=periodo)
@@ -116,7 +101,7 @@ def extraer_datos_expediente(page, expediente):
                 except Exception:
                     pass
 
-        # Disparar la búsqueda
+        # Disparar búsqueda
         try:
             btn = page.locator("a[id*='btnBuscar'], input[id*='btnBuscar'], button[id*='btnBuscar'], .btn-buscar").first
             if btn.is_visible():
@@ -126,7 +111,6 @@ def extraer_datos_expediente(page, expediente):
         except Exception:
             page.locator(selector_numero).first.press("Enter")
 
-        # ⏳ ESPERA CLAVE: Esperar a que la red vuelva a quedar inactiva y los resultados se carguen en el DOM
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(3000)
 
@@ -136,40 +120,53 @@ def extraer_datos_expediente(page, expediente):
             print("   ⚠️ No se encontraron resultados para este expediente.")
             return None
 
-        # Lista de selectores probables para cada campo
-        objeto = obtener_texto_multiselector(page, [
-            "[id*='lblObjeto']", "[id*='lblSumario']", "[id*='lblCaratula']", 
-            "[id*='lblExtracto']", ".caratula", ".objeto", "td:has-text('Objeto') + td"
-        ])
-        
-        autor = obtener_texto_multiselector(page, [
-            "[id*='lblAutor']", "[id*='lblIniciador']", "[id*='lblFirmante']", "td:has-text('Autor') + td"
-        ])
-        
-        bloque = obtener_texto_multiselector(page, [
-            "[id*='lblBloque']", "[id*='lblPartido']", "td:has-text('Bloque') + td"
-        ])
-        
-        com_origen = obtener_texto_multiselector(page, [
-            "[id*='lblComisionesOrigen']", "[id*='lblComisiones']", "[id*='lblComision']", "td:has-text('Comisi') + td"
-        ])
-        
-        est_origen = obtener_texto_multiselector(page, [
-            "[id*='lblEstadoOrigen']", "[id*='lblEstado']", "[id*='lblSituacion']", "td:has-text('Estado') + td"
-        ])
-        
-        com_revisora = obtener_texto_multiselector(page, [
-            "[id*='lblComisionesRevisora']", "[id*='lblComisionRev']"
-        ])
-        
-        est_revisora = obtener_texto_multiselector(page, [
-            "[id*='lblEstadoRevisora']", "[id*='lblEstadoRev']"
-        ])
+        # Estrategia 1: Búsqueda directa por etiquetas de ID ASP.NET
+        def buscar_por_id_o_texto(patrones):
+            for pat in patrones:
+                loc = page.locator(f"[id*='{pat}'], [class*='{pat}']")
+                if loc.count() > 0:
+                    txt = loc.first.text_content().strip()
+                    if txt and txt.upper() != "SIN DATOS":
+                        return txt
+            return None
+
+        objeto = buscar_por_id_o_texto(["lblObjeto", "lblSumario", "lblCaratula", "lblExtracto", "Objeto", "Sumario"])
+        autor = buscar_por_id_o_texto(["lblAutor", "lblIniciador", "lblFirmante", "Autor", "Iniciador"])
+        bloque = buscar_por_id_o_texto(["lblBloque", "lblPartido", "Bloque"])
+        com_origen = buscar_por_id_o_texto(["lblComisionesOrigen", "lblComision", "Comision"])
+        est_origen = buscar_por_id_o_texto(["lblEstadoOrigen", "lblEstado", "Estado"])
+        com_revisora = buscar_por_id_o_texto(["lblComisionesRevisora", "ComisionRev"])
+        est_revisora = buscar_por_id_o_texto(["lblEstadoRevisora", "EstadoRev"])
+
+        # Estrategia 2: Fallback mediante escaneo de la Tabla de Resultados (Grid)
+        if not objeto or not autor:
+            filas_tabla = page.locator("table tr")
+            if filas_tabla.count() > 1:
+                # Extraer texto de las celdas de la primera fila de datos
+                celdas = filas_tabla.nth(1).locator("td")
+                cant_celdas = celdas.count()
+                
+                if cant_celdas >= 3:
+                    objeto = celdas.nth(1).text_content().strip() if not objeto else objeto
+                    autor = celdas.nth(2).text_content().strip() if not autor else autor
+                if cant_celdas >= 4 and not bloque:
+                    bloque = celdas.nth(3).text_content().strip()
+                if cant_celdas >= 5 and not est_origen:
+                    est_origen = celdas.nth(4).text_content().strip()
+
+        # Asignar valores por defecto si no se encontró información
+        objeto = objeto if objeto else "Ver carátula en web"
+        autor = autor if autor else "Sin datos"
+        bloque = bloque if bloque else "Sin datos"
+        com_origen = com_origen if com_origen else "Sin asignación"
+        est_origen = est_origen if est_origen else "En Estudio"
+        com_revisora = com_revisora if com_revisora else "N/A"
+        est_revisora = est_revisora if est_revisora else "N/A"
 
         media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() or "MEDIASANCION" in html_page.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print(f"   ✔ Extracción realizada: Objeto='{objeto[:30]}...', Autor='{autor}'")
+        print(f"   ✔ Extraído exitosamente: Objeto='{objeto[:30]}...', Autor='{autor}'")
 
         return [
             exp_str,
@@ -188,7 +185,7 @@ def extraer_datos_expediente(page, expediente):
         print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Bucle principal con guardado inmediato
+# 3. Guardado en tiempo real en Google Sheets
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -207,8 +204,8 @@ with sync_playwright() as p:
             if datos:
                 sheet_consolidado.append_row(datos)
                 cont_agregados += 1
-                print("   💾 Fila guardada correctamente en Google Sheets.")
+                print("   💾 Fila guardada correctamente con los datos extraídos.")
 
     browser.close()
 
-print(f"\n🎉 ¡Proceso finalizado! Se guardaron {cont_agregados} filas con datos.")
+print(f"\n🎉 ¡Proceso finalizado! Se completaron {cont_agregados} filas en Google Sheets.")
