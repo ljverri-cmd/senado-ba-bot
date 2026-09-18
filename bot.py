@@ -1,7 +1,7 @@
 import os
 import json
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 
 print("--- INICIANDO DIAGNÓSTICO DEL BOT ---")
 
@@ -13,9 +13,12 @@ try:
     else:
         print("✔ GCP_CREDENTIALS detectada correctamente.")
         
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
     creds_dict = json.loads(creds_json)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
     client = gspread.authorize(creds)
     print("✔ Autenticación con Google Cloud exitosa.")
 except Exception as e:
