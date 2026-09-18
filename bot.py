@@ -7,9 +7,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT CON SELECTORES PRECISOS SENADO PBA ---")
+print("--- 🚀 INICIANDO BOT COM SUBMISSÃO DIRETA SENADO PBA ---")
 
-# 1. Autenticación y conexión a Google Sheets
+# 1. Autenticação e conexão com o Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -29,9 +29,9 @@ try:
     except gspread.exceptions.WorksheetNotFound:
         sheet_consolidado = sh.add_worksheet(title="Senado_PBA_Consolidado", rows="1000", cols="10")
 
-    print(f"✔ Conectado exitosamente a la planilla: '{sh.title}'")
+    print(f"✔ Conectado com sucesso à planilha: '{sh.title}'")
 except Exception as e:
-    print(f"❌ Error al conectar con Google Sheets: {e}")
+    print(f"❌ Erro al conectar com Google Sheets: {e}")
     exit(1)
 
 ENCABEZADOS = [
@@ -50,13 +50,13 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Extracción apuntando a los controles ASP.NET de Contenedor_Pagina
+# 2. Extração adaptada com submissão direta do formulário
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
     
     if not match:
-        print(f"⚠️ Formato de expediente no válido: '{exp_str}'")
+        print(f"⚠️ Formato de expediente inválido: '{exp_str}'")
         return None
 
     letra = match.group(1).upper()
@@ -72,19 +72,16 @@ def extraer_datos_expediente(page, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Tipo: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(1000)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(1500)
 
-        # Selectores específicos ignorando reCAPTCHA y buscando elementos visibles
         selector_tipo = "select[id*='ddlTipo'], select[name*='ddlTipo']"
         selector_numero = "input[id*='txtNumero']:visible, input[name*='txtNumero']:visible"
         selector_periodo = "select[id*='ddlPeriodo'], select[name*='ddlPeriodo']"
-        selector_buscar = "input[id*='btnBuscar']:visible, input[name*='btnBuscar']:visible, button[id*='btnBuscar']:visible"
 
-        # Esperar a que la caja de texto real del expediente sea visible
         page.wait_for_selector(selector_numero, state="visible", timeout=15000)
 
-        # Seleccionar Tipo / Letra
+        # Selecionar Tipo / Letra
         try:
             page.locator(selector_tipo).first.select_option(value=letra)
         except Exception:
@@ -93,10 +90,10 @@ def extraer_datos_expediente(page, expediente):
             except Exception:
                 pass
 
-        # Llenar la caja de texto del Número
+        # Preencher o número
         page.locator(selector_numero).first.fill(numero)
 
-        # Seleccionar Período
+        # Selecionar o Período
         if page.locator(selector_periodo).count() > 0:
             try:
                 page.locator(selector_periodo).first.select_option(label=periodo)
@@ -106,19 +103,26 @@ def extraer_datos_expediente(page, expediente):
                 except Exception:
                     pass
 
-        # Hacer clic en Buscar
-        page.locator(selector_buscar).first.click()
+        # Submeter formulário via JavaScript ou através de clique genérico
+        try:
+            btn = page.locator("a[id*='btnBuscar'], input[id*='btnBuscar'], button[id*='btnBuscar'], .btn-buscar").first
+            if btn.is_visible():
+                btn.click()
+            else:
+                page.locator(selector_numero).first.press("Enter")
+        except Exception:
+            page.locator(selector_numero).first.press("Enter")
 
-        # Esperar la respuesta AJAX
+        # Aguardar processamento da resposta AJAX
         page.wait_for_timeout(4000)
 
         html_page = page.content()
 
         if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
-            print("   ⚠️ No se encontraron resultados para este expediente.")
+            print("   ⚠️ Nenhum resultado encontrado para este expediente.")
             return None
 
-        # Lectura de los campos devueltos en la tabla
+        # Leitura das informações retornadas na página
         objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").count() > 0 else "Sin datos"
         autor = page.locator("[id*='lblAutor']").first.text_content() if page.locator("[id*='lblAutor']").count() > 0 else "Sin datos"
         bloque = page.locator("[id*='lblBloque']").first.text_content() if page.locator("[id*='lblBloque']").count() > 0 else "Sin datos"
@@ -132,7 +136,7 @@ def extraer_datos_expediente(page, expediente):
         media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print("   ✔ ¡Datos extraídos correctamente!")
+        print("   ✔ Dados extraídos com sucesso!")
 
         return [
             exp_str,
@@ -148,10 +152,10 @@ def extraer_datos_expediente(page, expediente):
         ]
 
     except Exception as e:
-        print(f"   ❌ Error procesando {exp_str}: {e}")
+        print(f"   ❌ Erro ao processar {exp_str}: {e}")
         return None
 
-# 3. Lectura e inserción en la pestaña de consolidado
+# 3. Leitura e atualização da planilha
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -174,6 +178,6 @@ with sync_playwright() as p:
 
 if filas_para_consolidado:
     sheet_consolidado.append_rows(filas_para_consolidado)
-    print(f"\n🎉 ¡Proceso finalizado! Se agregaron {len(filas_para_consolidado)} registros en 'Senado_PBA_Consolidado'.")
+    print(f"\n🎉 Processo concluído! {len(filas_para_consolidado)} registros adicionados em 'Senado_PBA_Consolidado'.")
 else:
-    print("\n⚠️ No se obtuvieron registros nuevos.")
+    print("\n⚠️ Nenhum registro novo obtido.")
