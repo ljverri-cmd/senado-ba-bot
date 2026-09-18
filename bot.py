@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT CON SELECTORES UNIFICADOS SENADO PBA ---")
+print("--- 🚀 INICIANDO BOT CON SELECTORES PRECISOS SENADO PBA ---")
 
 # 1. Autenticación y conexión a Google Sheets
 try:
@@ -50,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Extracción adaptativa sobre el formulario unificado
+# 2. Extracción apuntando a los controles ASP.NET de Contenedor_Pagina
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -72,59 +72,44 @@ def extraer_datos_expediente(page, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Tipo: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        # Abrir la página del buscador
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(1500)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(1000)
 
-        # Buscar todos los desplegables e inputs visibles
-        selects = page.locator("select").all()
-        inputs_text = page.locator("input[type='text'], input:not([type])").all()
+        # Selectores específicos ignorando reCAPTCHA y buscando elementos visibles
+        selector_tipo = "select[id*='ddlTipo'], select[name*='ddlTipo']"
+        selector_numero = "input[id*='txtNumero']:visible, input[name*='txtNumero']:visible"
+        selector_periodo = "select[id*='ddlPeriodo'], select[name*='ddlPeriodo']"
+        selector_buscar = "input[id*='btnBuscar']:visible, input[name*='btnBuscar']:visible, button[id*='btnBuscar']:visible"
 
-        select_tipo = None
-        for s in selects:
-            if s.is_visible():
-                select_tipo = s
-                break
-
-        input_num = None
-        for i in inputs_text:
-            if i.is_visible():
-                input_num = i
-                break
-
-        if not select_tipo or not input_num:
-            # Reintento por selectores directos universales
-            select_tipo = page.locator("select").first
-            input_num = page.locator("input[type='text']").first
+        # Esperar a que la caja de texto real del expediente sea visible
+        page.wait_for_selector(selector_numero, state="visible", timeout=15000)
 
         # Seleccionar Tipo / Letra
         try:
-            select_tipo.select_option(value=letra)
+            page.locator(selector_tipo).first.select_option(value=letra)
         except Exception:
             try:
-                select_tipo.select_option(label=letra)
+                page.locator(selector_tipo).first.select_option(label=letra)
             except Exception:
                 pass
 
-        # Cargar Número
-        input_num.fill(numero)
+        # Llenar la caja de texto del Número
+        page.locator(selector_numero).first.fill(numero)
 
-        # Seleccionar Período (segundo combo visible si existe)
-        selects_visibles = [s for s in page.locator("select").all() if s.is_visible()]
-        if len(selects_visibles) > 1:
+        # Seleccionar Período
+        if page.locator(selector_periodo).count() > 0:
             try:
-                selects_visibles[1].select_option(label=periodo)
+                page.locator(selector_periodo).first.select_option(label=periodo)
             except Exception:
                 try:
-                    selects_visibles[1].select_option(value=periodo)
+                    page.locator(selector_periodo).first.select_option(value=periodo)
                 except Exception:
                     pass
 
-        # Hacer clic en el botón de búsqueda
-        btn_buscar = page.locator("input[type='submit'], input[value*='Buscar'], button:has-text('Buscar')").first
-        btn_buscar.click()
+        # Hacer clic en Buscar
+        page.locator(selector_buscar).first.click()
 
-        # Esperar la recarga del panel AJAX
+        # Esperar la respuesta AJAX
         page.wait_for_timeout(4000)
 
         html_page = page.content()
@@ -133,7 +118,7 @@ def extraer_datos_expediente(page, expediente):
             print("   ⚠️ No se encontraron resultados para este expediente.")
             return None
 
-        # Lectura de los campos de respuesta
+        # Lectura de los campos devueltos en la tabla
         objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").count() > 0 else "Sin datos"
         autor = page.locator("[id*='lblAutor']").first.text_content() if page.locator("[id*='lblAutor']").count() > 0 else "Sin datos"
         bloque = page.locator("[id*='lblBloque']").first.text_content() if page.locator("[id*='lblBloque']").count() > 0 else "Sin datos"
@@ -166,7 +151,7 @@ def extraer_datos_expediente(page, expediente):
         print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Lectura e inserción progresiva
+# 3. Lectura e inserción en la pestaña de consolidado
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
