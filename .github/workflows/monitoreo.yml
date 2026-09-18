@@ -21,13 +21,11 @@ jobs:
           python-version: '3.10'
 
       # 3. Instalar dependencias del bot
-      - name: Instalar dependencias
+- name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install gspread google-auth playwright
-          install gspread google-auth requests beautifulsoup4
-          pipplaywright install --with-deps chromium
-
+          pip install gspread google-auth requests beautifulsoup4 playwright
+          playwright install chromium
            
 
       # 4. Ejecutar el script del bot
