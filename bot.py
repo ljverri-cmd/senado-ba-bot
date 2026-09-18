@@ -7,9 +7,9 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (POST ASP.NET CON VIEWSTATE) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (ASP.NET AJAX UPDATEPANEL) ---")
 
-# 1. Autenticación y conexión con Google Sheets
+# 1. Conexión con Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -50,14 +50,9 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Content-Type": "application/x-www-form-urlencoded"
-}
-
 URL_BASE = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
 
-# 2. Función para obtener datos reales del expediente
+# 2. Función de consulta con simulación AJAX
 def extraer_datos_expediente(session, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -79,8 +74,11 @@ def extraer_datos_expediente(session, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        # Paso A: Obtener la página inicial para capturar ViewState
-        r_get = session.get(URL_BASE, headers=headers, timeout=20)
+        # A. Cargar la página inicial para obtener el ViewState original
+        headers_init = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r_get = session.get(URL_BASE, headers=headers_init, timeout=20)
         soup_get = BeautifulSoup(r_get.text, "html.parser")
 
         def get_hidden_val(name):
@@ -91,89 +89,109 @@ def extraer_datos_expediente(session, expediente):
         viewstategen = get_hidden_val("__VIEWSTATEGENERATOR")
         eventvalidation = get_hidden_val("__EVENTVALIDATION")
 
-        # Detectar el nombre real de los controles de formulario en el ASPX
-        btn_buscar_name = "ctl00$PageContent$btnBuscarProyectos"
-        input_num_name = "ctl00$PageContent$txtNumeroProyectos"
-        select_letra_name = "ctl00$PageContent$ddlLetraProyectos"
-        select_periodo_name = "ctl00$PageContent$ddlPeriodoProyectos"
+        # B. Identificar dinámicamente los controles de la página
+        input_num_name = "ctl00$PageContent$txtNumero"
+        select_letra_name = "ctl00$PageContent$ddlTipo"
+        select_periodo_name = "ctl00$PageContent$ddlPeriodo"
+        btn_buscar_name = "ctl00$PageContent$btnBuscar"
+        script_manager_name = "ctl00$ScriptManager1"
 
-        # Buscar inputs en el HTML si los nombres dinámicos varían
         for inp in soup_get.find_all(["input", "select"]):
             iname = inp.get("name", "")
             if "txtNumero" in iname or "Numero" in iname:
                 input_num_name = iname
-            elif "ddlLetra" in iname or "Tipo" in iname:
+            elif "ddlTipo" in iname or "ddlLetra" in iname or "Tipo" in iname:
                 select_letra_name = iname
             elif "ddlPeriodo" in iname or "Periodo" in iname:
                 select_periodo_name = iname
             elif "btnBuscar" in iname or "Buscar" in iname:
                 btn_buscar_name = iname
 
-        # Paso B: Construir el Payload del POST
+        # C. Construir los encabezados AJAX obligatorios para WebForms
+        headers_ajax = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-MicrosoftAjax": "Delta=true",
+            "Cache-Control": "no-cache",
+            "Referer": URL_BASE
+        }
+
+        # D. Payload con el UpdatePanel activo
         payload = {
+            script_manager_name: f"ctl00$PageContent$UpdatePanel1|{btn_buscar_name}",
+            "__EVENTTARGET": "",
+            "__EVENTARGUMENT": "",
             "__VIEWSTATE": viewstate,
             "__VIEWSTATEGENERATOR": viewstategen,
             "__EVENTVALIDATION": eventvalidation,
             select_letra_name: letra,
             input_num_name: numero,
             select_periodo_name: periodo,
+            "__ASYNCPOST": "true",
             btn_buscar_name: "Buscar"
         }
 
-        # Paso C: Enviar la consulta con el estado
-        r_post = session.post(URL_BASE, data=payload, headers=headers, timeout=25)
-        soup_post = BeautifulSoup(r_post.text, "html.parser")
+        # E. Enviar la llamada AJAX
+        r_post = session.post(URL_BASE, data=payload, headers=headers_ajax, timeout=25)
+        html_respuesta = r_post.text
 
-        # Paso D: Extraer la información filtrada de la tabla
+        soup_post = BeautifulSoup(html_respuesta, "html.parser")
+
+        # F. Extraer datos del resultado
         objeto = None
         autor = None
         comision = None
         estado = None
 
-        # Inspeccionar tablas en el HTML de respuesta
+        # Parsear todas las tablas generadas
         tablas = soup_post.find_all("table")
         for tabla in tablas:
             filas = tabla.find_all("tr")
-            for f in filas:
-                celdas = [c.get_text(strip=True) for c in f.find_all(["td", "th"])]
-                if len(celdas) >= 2:
-                    texto_fila = " ".join(celdas)
-                    if "Objeto" in celdas[0] or "Carátula" in celdas[0]:
-                        objeto = celdas[1]
-                    elif "Autor" in celdas[0] or "Iniciador" in celdas[0]:
-                        autor = celdas[1]
-                    elif "Comisión" in celdas[0]:
-                        comision = celdas[1]
-                    elif "Estado" in celdas[0]:
-                        estado = celdas[1]
+            if len(filas) > 1:
+                # Si es una grilla horizontal
+                headers_tabla = [h.get_text(strip=True).upper() for h in filas[0].find_all(["td", "th"])]
+                datos_fila = [c.get_text(strip=True) for c in filas[1].find_all("td")]
+                
+                if len(datos_fila) >= 2:
+                    for i, head in enumerate(headers_tabla):
+                        if i < len(datos_fila):
+                            val = datos_fila[i]
+                            if "OBJETO" in head or "SUMARIO" in head or "CARÁTULA" in head:
+                                objeto = val
+                            elif "AUTOR" in head or "INICIADOR" in head:
+                                autor = val
+                            elif "COMISIÓN" in head:
+                                comision = val
+                            elif "ESTADO" in head:
+                                estado = val
 
-        # Si viene en formato de grilla horizontal (filas de datos)
+        # Fallback de búsqueda Regex en el bloque delta de respuesta si no vino como tabla estándar
         if not objeto:
-            for tabla in tablas:
-                filas = tabla.find_all("tr")
-                if len(filas) > 1:
-                    headers_tabla = [h.get_text(strip=True).upper() for h in filas[0].find_all(["td", "th"])]
-                    if any("EXPEDIENTE" in h or "SUMARIO" in h or "PROYECTO" in h for h in headers_tabla):
-                        datos_fila = [c.get_text(strip=True) for c in filas[1].find_all("td")]
-                        if len(datos_fila) >= 3:
-                            objeto = datos_fila[1] if len(datos_fila) > 1 else None
-                            autor = datos_fila[2] if len(datos_fila) > 2 else None
-                            comision = datos_fila[3] if len(datos_fila) > 3 else None
-                            estado = datos_fila[4] if len(datos_fila) > 4 else None
-                            break
+            m_obj = re.search(r'(?:Objeto|Sumario|Carátula)[:\s]+([^\r\n\|<]+)', html_respuesta, re.IGNORECASE)
+            if m_obj:
+                objeto = m_obj.group(1).strip()
 
-        if not objeto and ("No se encontraron" in r_post.text or "Sin registros" in r_post.text):
+            m_aut = re.search(r'(?:Autor|Iniciador)[:\s]+([^\r\n\|<]+)', html_respuesta, re.IGNORECASE)
+            if m_aut:
+                autor = m_aut.group(1).strip()
+
+            m_est = re.search(r'(?:Estado|Situación)[:\s]+([^\r\n\|<]+)', html_respuesta, re.IGNORECASE)
+            if m_est:
+                estado = m_est.group(1).strip()
+
+        if "No se encontraron" in html_respuesta or "Sin registros" in html_respuesta:
             print("   ⚠️ No existen registros para este expediente en el Senado.")
             return None
 
-        objeto = objeto if objeto else "Ver ficha en portal oficial"
+        objeto = objeto if objeto else "Ver ficha en el portal del Senado"
         autor = autor if autor else "Sin datos"
         bloque = "Sin datos"
         com_origen = comision if comision else "Sin asignación"
         est_origen = estado if estado else "En Estudio"
         com_revisora = "N/A"
         est_revisora = "N/A"
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in r_post.text.upper() else "No"
+        media_sancion = "Sí" if "MEDIA SANCIÓN" in html_respuesta.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
         print(f"   ✔ Extraído REAL: Objeto='{objeto[:40]}...', Autor='{autor}', Estado='{est_origen}'")
