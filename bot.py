@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT CON ESCRITURA EN TIEMPO REAL SENADO PBA ---")
+print("--- 🚀 INICIANDO BOT CON ESPERA AJAX Y SELECTORES DETALLADOS ---")
 
 # 1. Autenticación y conexión a Google Sheets
 try:
@@ -50,7 +50,20 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Extracción de datos del expediente
+# Función auxiliar para buscar texto en múltiples selectores posibles
+def obtener_texto_multiselector(page, selectores):
+    for sel in selectores:
+        try:
+            elementos = page.locator(sel)
+            if elementos.count() > 0:
+                texto = elementos.first.text_content().strip()
+                if texto and texto.upper() != "SIN DATOS":
+                    return texto
+        except Exception:
+            continue
+    return "Sin datos"
+
+# 2. Extracción de datos con espera explícita
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -72,8 +85,8 @@ def extraer_datos_expediente(page, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Tipo: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(1500)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(1000)
 
         selector_tipo = "select[id*='ddlTipo'], select[name*='ddlTipo']"
         selector_numero = "input[id*='txtNumero']:visible, input[name*='txtNumero']:visible"
@@ -81,7 +94,7 @@ def extraer_datos_expediente(page, expediente):
 
         page.wait_for_selector(selector_numero, state="visible", timeout=15000)
 
-        # Seleccionar Tipo / Letra
+        # Seleccionar Tipo
         try:
             page.locator(selector_tipo).first.select_option(value=letra)
         except Exception:
@@ -103,7 +116,7 @@ def extraer_datos_expediente(page, expediente):
                 except Exception:
                     pass
 
-        # Disparar búsqueda por Enter o clic
+        # Disparar la búsqueda
         try:
             btn = page.locator("a[id*='btnBuscar'], input[id*='btnBuscar'], button[id*='btnBuscar'], .btn-buscar").first
             if btn.is_visible():
@@ -113,7 +126,9 @@ def extraer_datos_expediente(page, expediente):
         except Exception:
             page.locator(selector_numero).first.press("Enter")
 
-        page.wait_for_timeout(4000)
+        # ⏳ ESPERA CLAVE: Esperar a que la red vuelva a quedar inactiva y los resultados se carguen en el DOM
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(3000)
 
         html_page = page.content()
 
@@ -121,30 +136,50 @@ def extraer_datos_expediente(page, expediente):
             print("   ⚠️ No se encontraron resultados para este expediente.")
             return None
 
-        objeto = page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").first.text_content() if page.locator("[id*='lblObjeto'], [id*='lblSumario'], [id*='Caratula'], .caratula").count() > 0 else "Sin datos"
-        autor = page.locator("[id*='lblAutor']").first.text_content() if page.locator("[id*='lblAutor']").count() > 0 else "Sin datos"
-        bloque = page.locator("[id*='lblBloque']").first.text_content() if page.locator("[id*='lblBloque']").count() > 0 else "Sin datos"
+        # Lista de selectores probables para cada campo
+        objeto = obtener_texto_multiselector(page, [
+            "[id*='lblObjeto']", "[id*='lblSumario']", "[id*='lblCaratula']", 
+            "[id*='lblExtracto']", ".caratula", ".objeto", "td:has-text('Objeto') + td"
+        ])
         
-        com_origen = page.locator("[id*='lblComisionesOrigen']").first.text_content() if page.locator("[id*='lblComisionesOrigen']").count() > 0 else "Sin asignación"
-        est_origen = page.locator("[id*='lblEstadoOrigen'], [id*='lblEstado']").first.text_content() if page.locator("[id*='lblEstadoOrigen'], [id*='lblEstado']").count() > 0 else "En Estudio"
+        autor = obtener_texto_multiselector(page, [
+            "[id*='lblAutor']", "[id*='lblIniciador']", "[id*='lblFirmante']", "td:has-text('Autor') + td"
+        ])
         
-        com_revisora = page.locator("[id*='lblComisionesRevisora']").first.text_content() if page.locator("[id*='lblComisionesRevisora']").count() > 0 else "N/A"
-        est_revisora = page.locator("[id*='lblEstadoRevisora']").first.text_content() if page.locator("[id*='lblEstadoRevisora']").count() > 0 else "N/A"
+        bloque = obtener_texto_multiselector(page, [
+            "[id*='lblBloque']", "[id*='lblPartido']", "td:has-text('Bloque') + td"
+        ])
+        
+        com_origen = obtener_texto_multiselector(page, [
+            "[id*='lblComisionesOrigen']", "[id*='lblComisiones']", "[id*='lblComision']", "td:has-text('Comisi') + td"
+        ])
+        
+        est_origen = obtener_texto_multiselector(page, [
+            "[id*='lblEstadoOrigen']", "[id*='lblEstado']", "[id*='lblSituacion']", "td:has-text('Estado') + td"
+        ])
+        
+        com_revisora = obtener_texto_multiselector(page, [
+            "[id*='lblComisionesRevisora']", "[id*='lblComisionRev']"
+        ])
+        
+        est_revisora = obtener_texto_multiselector(page, [
+            "[id*='lblEstadoRevisora']", "[id*='lblEstadoRev']"
+        ])
 
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() else "No"
+        media_sancion = "Sí" if "MEDIA SANCIÓN" in html_page.upper() or "MEDIASANCION" in html_page.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print("   ✔ ¡Datos extraídos correctamente!")
+        print(f"   ✔ Extracción realizada: Objeto='{objeto[:30]}...', Autor='{autor}'")
 
         return [
             exp_str,
-            objeto.strip() if objeto else "Sin datos",
-            autor.strip() if autor else "Sin datos",
-            bloque.strip() if bloque else "Sin datos",
-            com_origen.strip() if com_origen else "Sin asignación",
-            est_origen.strip() if est_origen else "En Estudio",
-            com_revisora.strip() if com_revisora else "N/A",
-            est_revisora.strip() if est_revisora else "N/A",
+            objeto,
+            autor,
+            bloque,
+            com_origen,
+            est_origen,
+            com_revisora,
+            est_revisora,
             media_sancion,
             fecha_act
         ]
@@ -153,7 +188,7 @@ def extraer_datos_expediente(page, expediente):
         print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Lectura e Inserción Inmediata por Fila (Instant Write)
+# 3. Bucle principal con guardado inmediato
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -170,11 +205,10 @@ with sync_playwright() as p:
         if exp.strip():
             datos = extraer_datos_expediente(page, exp)
             if datos:
-                # Se guarda inmediatamente la fila en Google Sheets
                 sheet_consolidado.append_row(datos)
                 cont_agregados += 1
-                print(f"   💾 Fila guardada inmediatamente en 'Senado_PBA_Consolidado'")
+                print("   💾 Fila guardada correctamente en Google Sheets.")
 
     browser.close()
 
-print(f"\n🎉 ¡Proceso finalizado! Se guardaron {cont_agregados} filas en tiempo real.")
+print(f"\n🎉 ¡Proceso finalizado! Se guardaron {cont_agregados} filas con datos.")
