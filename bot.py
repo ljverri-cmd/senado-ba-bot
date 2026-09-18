@@ -2,14 +2,14 @@ import os
 import json
 import re
 from datetime import datetime
-
+import requests
+from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (CAPTURA POR POSTBACK E GRIDVIEW) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (HTTP DIRECCIÓN DIRECTA) ---")
 
-# 1. Autenticação e conexão com Google Sheets
+# 1. Autenticación y conexión con Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -50,8 +50,13 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Extractor de datos con manejo de detalles y PostBack
-def extraer_datos_expediente(page, expediente):
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+}
+
+# 2. Función de consulta y extracción
+def extraer_datos_expediente(session, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
     
@@ -72,85 +77,52 @@ def extraer_datos_expediente(page, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(1500)
+        # Petición GET directa con parámetros de búsqueda
+        url = f"https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx?tipo={letra}&numero={numero}&periodo={periodo}"
+        resp = session.get(url, headers=headers, timeout=20)
 
-        # Campos de formulario
-        input_numero = page.locator("input[id*='txtNumero'], input[name*='Numero']").first
-        input_numero.wait_for(state="visible", timeout=15000)
+        if resp.status_code != 200:
+            print(f"   ⚠️ Error HTTP {resp.status_code} al consultar la página.")
+            return None
 
-        select_tipo = page.locator("select[id*='ddlTipo'], select[name*='Tipo']").first
-        if select_tipo.count() > 0:
-            try:
-                select_tipo.select_option(value=letra)
-            except Exception:
-                try:
-                    select_tipo.select_option(label=letra)
-                except Exception:
-                    pass
+        soup = BeautifulSoup(resp.text, "html.parser")
+        texto_pagina = soup.get_text(separator="\n")
 
-        input_numero.fill(numero)
-
-        select_periodo = page.locator("select[id*='ddlPeriodo'], select[name*='Periodo']").first
-        if select_periodo.count() > 0:
-            try:
-                select_periodo.select_option(label=periodo)
-            except Exception:
-                try:
-                    select_periodo.select_option(value=periodo)
-                except Exception:
-                    pass
-
-        # Disparar búsqueda
-        print("   🚀 Enviando formulario de búsqueda...")
-        input_numero.press("Enter")
-
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(2500)
-
-        html_page = page.content()
-
-        if "No se encontraron registros" in html_page or "Sin resultados" in html_page:
+        if "No se encontraron" in texto_pagina or "Sin resultados" in texto_pagina:
             print("   ⚠️ No se encontraron resultados para este expediente.")
             return None
 
-        # Intentar hacer clic en el enlace del expediente si existe la grilla
-        # Usamos timeout=5000 dentro de try/except para evitar bloqueos de 30s
-        seletor_link = "table[id*='Grid'] a, table[id*='grd'] a, .table a, a[id*='lnk'], a[id*='btn']"
-        link_resultado = page.locator(seletor_link).first
-
-        try:
-            if link_resultado.is_visible(timeout=5000):
-                print("   📄 Abriendo ficha de detalle...")
-                link_resultado.click(timeout=5000)
-                page.wait_for_load_state("networkidle")
-                page.wait_for_timeout(2000)
-        except Exception:
-            print("   ℹ️ No fue necesario hacer clic en el detalle (información presente en la grilla principal).")
-
-        # Captura de texto del cuerpo
-        texto_cuerpo = page.inner_text("body")
-
-        def buscar_regex(patrones, texto):
+        # Búsqueda por Regex en el texto estructurado del HTML
+        def buscar_campo(patrones):
             for pat in patrones:
-                m = re.search(f"{pat}[:\\s]+([^\\n\\r]+)", texto, re.IGNORECASE)
+                m = re.search(f"{pat}[:\\s]+([^\\n\\r]+)", texto_pagina, re.IGNORECASE)
                 if m:
                     val = m.group(1).strip()
-                    if val and len(val) > 1:
+                    if val and len(val) > 1 and "SIN DATOS" not in val.upper():
                         return val
             return None
 
-        objeto = buscar_regex(["Objeto", "Sumario", "Carátula", "Extracto", "Proyecto"], texto_cuerpo)
-        autor = buscar_regex(["Autor", "Iniciador", "Firmante", "Senador"], texto_cuerpo)
-        bloque = buscar_regex(["Bloque", "Partido", "Bloque Político"], texto_cuerpo)
-        com_origen = buscar_regex(["Comisión", "Comisiones", "Giro a comisión"], texto_cuerpo)
-        est_origen = buscar_regex(["Estado", "Estado en comisión", "Situación"], texto_cuerpo)
+        objeto = buscar_campo(["Objeto", "Sumario", "Carátula", "Extracto", "Proyecto"])
+        autor = buscar_campo(["Autor", "Iniciador", "Firmante", "Senador"])
+        bloque = buscar_campo(["Bloque", "Partido", "Bloque Político"])
+        com_origen = buscar_campo(["Comisión", "Comisiones", "Giro a comisión"])
+        est_origen = buscar_campo(["Estado", "Estado en comisión", "Situación"])
 
-        if not objeto:
-            lineas_validas = [linea.strip() for linea in texto_cuerpo.split("\n") if len(linea.strip()) > 25]
-            objeto = lineas_validas[0] if lineas_validas else "Ver ficha en la web"
+        # Si BeautifulSoup encuentra tablas de datos (Grid)
+        tablas = soup.find_all("table")
+        for tabla in tablas:
+            filas = tabla.find_all("tr")
+            if len(filas) > 1:
+                celdas = filas[1].find_all(["td", "th"])
+                txt_celdas = [c.get_text(strip=True) for c in celdas]
+                if len(txt_celdas) >= 3:
+                    if not objeto or objeto == "Ver ficha en la web":
+                        objeto = txt_celdas[1] if len(txt_celdas[1]) > 5 else objeto
+                    if not autor or autor == "Sin datos":
+                        autor = txt_celdas[2] if len(txt_celdas[2]) > 2 else autor
 
-        objeto = objeto if objeto else "Ver ficha en la web"
+        # Valores por defecto de resguardo
+        objeto = objeto if objeto else "Proyecto registrado en portal"
         autor = autor if autor else "Sin datos"
         bloque = bloque if bloque else "Sin datos"
         com_origen = com_origen if com_origen else "Sin asignación"
@@ -158,10 +130,10 @@ def extraer_datos_expediente(page, expediente):
 
         com_revisora = "N/A"
         est_revisora = "N/A"
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in texto_cuerpo.upper() else "No"
+        media_sancion = "Sí" if "MEDIA SANCIÓN" in texto_pagina.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print(f"   ✔ Extracción exitosa: Objeto='{objeto[:35]}...', Autor='{autor}'")
+        print(f"   ✔ Extraído correctamente: Objeto='{objeto[:40]}...', Autor='{autor}'")
 
         return [
             exp_str,
@@ -180,28 +152,19 @@ def extraer_datos_expediente(page, expediente):
         print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Guardado en Google Sheets
+# 3. Bucle principal
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
 cont_agregados = 0
+session = requests.Session()
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    context = browser.new_context(
-        viewport={"width": 1280, "height": 800},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    page = context.new_page()
+for exp in expedientes_origen:
+    if exp.strip():
+        datos = extraer_datos_expediente(session, exp)
+        if datos:
+            sheet_consolidado.append_row(datos)
+            cont_agregados += 1
+            print("   💾 Fila guardada correctamente en Google Sheets.")
 
-    for exp in expedientes_origen:
-        if exp.strip():
-            datos = extraer_datos_expediente(page, exp)
-            if datos:
-                sheet_consolidado.append_row(datos)
-                cont_agregados += 1
-                print("   💾 Fila guardada correctamente en Google Sheets.")
-
-    browser.close()
-
-print(f"\n🎉 ¡Proceso finalizado! Se procesaron {cont_agregados} expedientes.")
+print(f"\n🎉 ¡Proceso finalizado! Se actualizaron {cont_agregados} expedientes.")
