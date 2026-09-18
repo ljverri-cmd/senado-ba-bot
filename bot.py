@@ -27,7 +27,7 @@ except Exception as e:
     print(f"❌ Error al abrir Google Sheets: {e}")
     exit(1)
 
-# 2. Función de Scraping adaptada a la estructura de ASP.NET
+# 2. Función de Scraping adaptada a IFrames y ASP.NET
 def consultar_estado_senado(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -49,51 +49,56 @@ def consultar_estado_senado(page, expediente):
     print(f"   🔎 Buscando -> Letra: '{letra}', Número: '{numero}', Período: '{periodo}'")
 
     try:
-        # Cargar el sitio con espera de DOM listo
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
-        
-        # Intentar seleccionar pestaña Proyectos si existe en la interfaz, o continuar directamente
-        try:
-            tab_proyectos = page.locator("a:has-text('PROYECTOS'), #btnProyectos, input[value*='PROYECTOS']").first
-            if tab_proyectos.is_visible(timeout=3000):
-                tab_proyectos.click()
-                page.wait_for_timeout(1000)
-        except Exception:
-            pass # Si la pestaña ya está activa o no requiere clic, continua
-            
-        # Esperar a que el formulario esté listo (busca cualquier select o input de tipo/letra)
-        select_letra = page.locator("select[id*='ddlLetra'], select[name*='ddlLetra'], select[id*='tipo']").first
+        # Cargar el sitio principal
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(2000)
+
+        # Buscar el marco (frame) correcto si la consulta está en un iframe
+        target = page
+        for frame in page.frames:
+            if "leyes" in frame.url.lower() or "proyectos" in frame.url.lower() or frame.locator("select, input").count() > 0:
+                target = frame
+                break
+
+        # Buscar cualquier select para el Tipo/Letra
+        select_letra = target.locator("select").first
         select_letra.wait_for(state="visible", timeout=15000)
 
-        # Completar los campos usando locators flexibles
-        select_letra.select_option(value=letra)
-        
-        input_num = page.locator("input[id*='txtNumero'], input[name*='txtNumero']").first
+        # Seleccionar la Letra
+        try:
+            select_letra.select_option(value=letra)
+        except Exception:
+            select_letra.select_option(label=letra)
+
+        # Buscar la caja de texto numérica
+        input_num = target.locator("input[type='text']").first
         input_num.fill(numero)
 
-        select_periodo = page.locator("select[id*='ddlPeriodo'], select[name*='ddlPeriodo']").first
-        try:
-            select_periodo.select_option(label=periodo)
-        except Exception:
-            select_periodo.select_option(value=periodo)
+        # Buscar el desplegable de período
+        selects = target.locator("select").all()
+        if len(selects) > 1:
+            try:
+                selects[1].select_option(label=periodo)
+            except Exception:
+                selects[1].select_option(value=periodo)
 
-        # Clic en el botón Buscar
-        btn_buscar = page.locator("input[type='submit'][id*='btnBuscar'], input[value*='Buscar']").first
+        # Buscar el botón de búsqueda
+        btn_buscar = target.locator("input[type='submit'], button, input[type='button']").first
         btn_buscar.click()
 
-        # Esperar a que el servidor actualice la respuesta
+        # Esperar la recarga dinámica por AJAX/ASP.NET
         page.wait_for_timeout(4000)
 
-        html_respuesta = page.content()
+        html_respuesta = target.content()
 
-        # Regex para capturar los estados comunes de la legislatura
+        # Capturar el estado con expresiones regulares
         patron = r'(En Estudio|Aprobado c\/Modificaciones|Aprobado|Archivado|Media Sanción|En Comisión|Sancionado|Promulgada)'
         match_estado = re.search(patron, html_respuesta, re.IGNORECASE)
 
         if match_estado:
             return match_estado.group(0).strip()
         
-        print("   ⚠️ No se encontró estado visible en el resultado HTML.")
+        print("   ⚠️ La búsqueda finalizó pero no se encontró la etiqueta del estado.")
         return None
 
     except Exception as err:
@@ -103,8 +108,10 @@ def consultar_estado_senado(page, expediente):
 # 3. Procesamiento de filas
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
-    # User agent para evitar bloqueos
-    context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport={'width': 1280, 'height': 800}
+    )
     page = context.new_page()
 
     for idx, fila in enumerate(filas, start=2):
@@ -129,8 +136,6 @@ with sync_playwright() as p:
             print(f"   🌐 Estado en web: '{estado_web}'")
             if str(estado_web).strip().lower() != str(estado_guardado).strip().lower():
                 print(f"   🚨 ¡CAMBIO DETECTADO! Actualizando fila {idx}...")
-                
-                # Ajusta el '6' al índice numérico real de la columna donde guardas el Estado
                 sheet.update_cell(idx, 6, estado_web)
                 print("   ✔ Fila actualizada en Google Sheets.")
             else:
