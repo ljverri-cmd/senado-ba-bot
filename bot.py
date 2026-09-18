@@ -27,7 +27,7 @@ except Exception as e:
     print(f"❌ Error al abrir Google Sheets: {e}")
     exit(1)
 
-# 2. Función de Scraping adaptada a la interacción de pestañas del Senado PBA
+# 2. Función de Scraping corregida para Playwright
 def consultar_estado_senado(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -52,13 +52,13 @@ def consultar_estado_senado(page, expediente):
         # Cargar el sitio principal
         page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
         
-        # PASO CLAVE: Forzar clic en la pestaña "Proyectos" para renderizar el formulario
-        tab_proyectos = page.locator("text=/proyectos/i, a:has-text('PROYECTOS'), [id*='btnProyectos']").first
+        # PASO CLAVE CORREGIDO: Hacer clic en la pestaña "Proyectos" usando locators estándar
+        tab_proyectos = page.get_by_role("link", name="PROYECTOS").or_(page.locator("a:has-text('PROYECTOS'), [id*='btnProyectos']")).first
         if tab_proyectos.is_visible(timeout=5000):
             tab_proyectos.click()
             page.wait_for_timeout(1500)
 
-        # Esperar a que aparezcan los desplegables tras el PostBack
+        # Esperar a que aparezcan los desplegables
         select_letra = page.locator("select").first
         select_letra.wait_for(state="visible", timeout=20000)
 
@@ -84,12 +84,12 @@ def consultar_estado_senado(page, expediente):
         btn_buscar = page.locator("input[type='submit'], button, input[value*='Buscar']").first
         btn_buscar.click()
 
-        # Esperar que carguen los resultados
+        # Esperar la recarga de resultados
         page.wait_for_timeout(3500)
 
         html_respuesta = page.content()
 
-        # Regex para capturar los estados habituales
+        # Regex para capturar el estado resultante
         patron = r'(En Estudio|Aprobado c\/Modificaciones|Aprobado|Archivado|Media Sanción|En Comisión|Sancionado|Promulgada)'
         match_estado = re.search(patron, html_respuesta, re.IGNORECASE)
 
@@ -115,7 +115,7 @@ with sync_playwright() as p:
         expediente = None
         estado_guardado = None
 
-        # Detectar columnas automáticamente sin importar variaciones de nombre
+        # Detectar columnas automáticamente
         for clave, valor in fila.items():
             clave_lower = str(clave).lower().strip()
             if "expediente" in clave_lower:
@@ -135,7 +135,7 @@ with sync_playwright() as p:
             if str(estado_web).strip().lower() != str(estado_guardado).strip().lower():
                 print(f"   🚨 ¡CAMBIO DETECTADO! Actualizando fila {idx}...")
                 
-                # Modifica el número '6' por la posición numérica exacta de tu columna de Estado (A=1, B=2, C=3, D=4, E=5, F=6...)
+                # Reemplaza '6' por la posición numérica real de la columna del Estado en tu planilla (A=1, B=2, C=3, D=4, E=5, F=6, etc.)
                 sheet.update_cell(idx, 6, estado_web)
                 print("   ✔ Fila actualizada en Google Sheets.")
             else:
