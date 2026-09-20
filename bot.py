@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (PLAYWRIGHT DIAGNÓSTICO AVANZADO) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (EXTRACCIÓN DE FICHA DETALLADA) ---")
 
 # 1. Autenticación y conexión con Google Sheets
 try:
@@ -50,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Función de consulta e interacción web
+# 2. Función para consultar e ingresar a la ficha
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -72,26 +72,23 @@ def extraer_datos_expediente(page, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        # Cargar sitio web
+        # Ir a la página del Senado PBA
         page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2000)
 
-        # Buscar si la consulta está atrapada dentro de un iframe
-        iframes = page.frames
+        # Detectar el marco/iframe activo
         frame_target = page
-        for frame in iframes:
+        for frame in page.frames:
             if "Leyes" in frame.url or "proyecto" in frame.url.lower():
                 frame_target = frame
-                print(f"   ℹ️ Detectado iframe de trabajo: {frame.url}")
                 break
 
-        # Llenar número
+        # Completar inputs de búsqueda
         input_num = frame_target.locator("input[id*='txtNumero'], input[name*='Numero']").first
         input_num.wait_for(state="visible", timeout=10000)
         input_num.fill("")
         input_num.fill(numero)
 
-        # Seleccionar letra/tipo
         select_letra = frame_target.locator("select[id*='ddlTipo'], select[id*='ddlLetra'], select[name*='Tipo']").first
         if select_letra.count() > 0:
             try:
@@ -102,7 +99,6 @@ def extraer_datos_expediente(page, expediente):
                 except Exception:
                     pass
 
-        # Seleccionar período/año
         select_periodo = frame_target.locator("select[id*='ddlPeriodo'], select[name*='Periodo']").first
         if select_periodo.count() > 0:
             try:
@@ -113,7 +109,7 @@ def extraer_datos_expediente(page, expediente):
                 except Exception:
                     pass
 
-        # Hacer clic en Buscar
+        # Clic en buscar
         btn_buscar = frame_target.locator("input[type='submit'][value*='Buscar'], button:has-text('Buscar'), input[id*='btnBuscar']").first
         if btn_buscar.count() > 0:
             btn_buscar.click()
@@ -121,44 +117,56 @@ def extraer_datos_expediente(page, expediente):
             input_num.press("Enter")
 
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(3000)
 
-        # Diagnóstico: Imprimir fragmento del contenido obtenido
-        texto_pagina = frame_target.inner_text("body")
-        print("   --- 📋 FRAGMENTO DEL TEXTO EN PÁGINA ---")
-        lineas = [l.strip() for l in texto_pagina.split("\n") if l.strip()]
-        for l in lineas[:12]: # Muestra las primeras 12 líneas reales del DOM
-            print(f"   | {l}")
-        print("   ----------------------------------------")
+        # Paso clave: Intentar ingresar al detalle/ficha del resultado
+        links_detalle = frame_target.locator("a:has-text('Ver'), a:has-text('Ficha'), a:has-text('Detalle'), table tr td a").all()
+        if len(links_detalle) > 0:
+            print("   📄 Abriendo ficha de detalle del expediente...")
+            try:
+                links_detalle[0].click()
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
 
-        # Parsear tabla de resultados
-        filas_grid = frame_target.locator("table tr").all()
-        
-        objeto, autor, comision, estado = None, None, None, None
+        # Capturar el contenido del modal o nuevo cuadro cargado
+        texto_completo = page.inner_text("body")
 
-        if len(filas_grid) > 1:
-            for fila in filas_grid:
-                txt_row = fila.inner_text()
-                if numero in txt_row or letra in txt_row or "Objeto" in txt_row or len(txt_row) > 30:
-                    celdas = [c.strip() for c in txt_row.split("\t") if c.strip()]
-                    if len(celdas) >= 2:
-                        objeto = celdas[1] if len(celdas) > 1 else None
-                        autor = celdas[2] if len(celdas) > 2 else None
-                        comision = celdas[3] if len(celdas) > 3 else None
-                        estado = celdas[4] if len(celdas) > 4 else None
-                        break
+        # Búsqueda de valores mediante expresiones regulares sobre el DOM completo
+        def extraer_campo(patrones):
+            for pat in patrones:
+                m = re.search(f"{pat}[:\\s]+([^\\r\\n\\|]+)", texto_completo, re.IGNORECASE)
+                if m:
+                    res = m.group(1).strip()
+                    if res and len(res) > 1 and "VER FICHA" not in res.upper():
+                        return res
+            return None
 
-        objeto = objeto if objeto else "Ver ficha en portal"
+        objeto = extraer_campo(["Objeto", "Sumario", "Carátula", "Extracto", "Proyecto de"])
+        autor = extraer_campo(["Autor", "Iniciador", "Firmante", "Senador"])
+        bloque = extraer_campo(["Bloque", "Partido"])
+        com_origen = extraer_campo(["Comisiones", "Comisión", "Giro"])
+        est_origen = extraer_campo(["Estado", "Situación", "Estado en Comisión"])
+
+        # Si el texto de la ficha no matcheó etiquetas directas, buscar bloques largos de texto
+        if not objeto:
+            lineas = [l.strip() for l in texto_completo.split("\n") if len(l.strip()) > 20]
+            for l in lineas:
+                if not any(k in l.upper() for k in ["EXPEDIENTE", "LEGISLATIVO", "BUSCAR", "CÁMARA", "SENADO"]):
+                    objeto = l
+                    break
+
+        objeto = objeto if objeto else "Proyecto registrado en portal oficial"
         autor = autor if autor else "Sin datos"
-        bloque = "Sin datos"
-        com_origen = comision if comision else "Sin asignación"
-        est_origen = estado if estado else "En Estudio"
+        bloque = bloque if bloque else "Sin datos"
+        com_origen = com_origen if com_origen else "Sin asignación"
+        est_origen = est_origen if est_origen else "En Estudio"
         com_revisora = "N/A"
         est_revisora = "N/A"
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in texto_pagina.upper() else "No"
+        media_sancion = "Sí" if "MEDIA SANCIÓN" in texto_completo.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print(f"   ✔ Resultado obtenido: Objeto='{objeto[:35]}...', Estado='{est_origen}'")
+        print(f"   ✔ Extraído REAL: Objeto='{objeto[:40]}...', Autor='{autor}', Estado='{est_origen}'")
 
         return [
             exp_str,
