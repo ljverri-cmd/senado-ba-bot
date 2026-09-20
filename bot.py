@@ -2,14 +2,14 @@ import os
 import json
 import re
 from datetime import datetime
-import requests
-from bs4 import BeautifulSoup
+
 import gspread
 from google.oauth2.service_account import Credentials
+from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (ASP.NET AJAX UPDATEPANEL) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (PLAYWRIGHT DIAGNÓSTICO AVANZADO) ---")
 
-# 1. Conexión con Google Sheets
+# 1. Autenticación y conexión con Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -50,10 +50,8 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-URL_BASE = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
-
-# 2. Función de consulta con simulación AJAX
-def extraer_datos_expediente(session, expediente):
+# 2. Función de consulta e interacción web
+def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
     
@@ -74,127 +72,93 @@ def extraer_datos_expediente(session, expediente):
     print(f"\n🔎 Consultando expediente: {exp_str} -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo}'")
 
     try:
-        # A. Cargar la página inicial para obtener el ViewState original
-        headers_init = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        r_get = session.get(URL_BASE, headers=headers_init, timeout=20)
-        soup_get = BeautifulSoup(r_get.text, "html.parser")
+        # Cargar sitio web
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(3000)
 
-        def get_hidden_val(name):
-            elem = soup_get.find("input", {"name": name})
-            return elem["value"] if elem and elem.has_attr("value") else ""
+        # Buscar si la consulta está atrapada dentro de un iframe
+        iframes = page.frames
+        frame_target = page
+        for frame in iframes:
+            if "Leyes" in frame.url or "proyecto" in frame.url.lower():
+                frame_target = frame
+                print(f"   ℹ️ Detectado iframe de trabajo: {frame.url}")
+                break
 
-        viewstate = get_hidden_val("__VIEWSTATE")
-        viewstategen = get_hidden_val("__VIEWSTATEGENERATOR")
-        eventvalidation = get_hidden_val("__EVENTVALIDATION")
+        # Llenar número
+        input_num = frame_target.locator("input[id*='txtNumero'], input[name*='Numero']").first
+        input_num.wait_for(state="visible", timeout=10000)
+        input_num.fill("")
+        input_num.fill(numero)
 
-        # B. Identificar dinámicamente los controles de la página
-        input_num_name = "ctl00$PageContent$txtNumero"
-        select_letra_name = "ctl00$PageContent$ddlTipo"
-        select_periodo_name = "ctl00$PageContent$ddlPeriodo"
-        btn_buscar_name = "ctl00$PageContent$btnBuscar"
-        script_manager_name = "ctl00$ScriptManager1"
+        # Seleccionar letra/tipo
+        select_letra = frame_target.locator("select[id*='ddlTipo'], select[id*='ddlLetra'], select[name*='Tipo']").first
+        if select_letra.count() > 0:
+            try:
+                select_letra.select_option(value=letra)
+            except Exception:
+                try:
+                    select_letra.select_option(label=letra)
+                except Exception:
+                    pass
 
-        for inp in soup_get.find_all(["input", "select"]):
-            iname = inp.get("name", "")
-            if "txtNumero" in iname or "Numero" in iname:
-                input_num_name = iname
-            elif "ddlTipo" in iname or "ddlLetra" in iname or "Tipo" in iname:
-                select_letra_name = iname
-            elif "ddlPeriodo" in iname or "Periodo" in iname:
-                select_periodo_name = iname
-            elif "btnBuscar" in iname or "Buscar" in iname:
-                btn_buscar_name = iname
+        # Seleccionar período/año
+        select_periodo = frame_target.locator("select[id*='ddlPeriodo'], select[name*='Periodo']").first
+        if select_periodo.count() > 0:
+            try:
+                select_periodo.select_option(label=periodo)
+            except Exception:
+                try:
+                    select_periodo.select_option(value=periodo)
+                except Exception:
+                    pass
 
-        # C. Construir los encabezados AJAX obligatorios para WebForms
-        headers_ajax = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-            "X-MicrosoftAjax": "Delta=true",
-            "Cache-Control": "no-cache",
-            "Referer": URL_BASE
-        }
+        # Hacer clic en Buscar
+        btn_buscar = frame_target.locator("input[type='submit'][value*='Buscar'], button:has-text('Buscar'), input[id*='btnBuscar']").first
+        if btn_buscar.count() > 0:
+            btn_buscar.click()
+        else:
+            input_num.press("Enter")
 
-        # D. Payload con el UpdatePanel activo
-        payload = {
-            script_manager_name: f"ctl00$PageContent$UpdatePanel1|{btn_buscar_name}",
-            "__EVENTTARGET": "",
-            "__EVENTARGUMENT": "",
-            "__VIEWSTATE": viewstate,
-            "__VIEWSTATEGENERATOR": viewstategen,
-            "__EVENTVALIDATION": eventvalidation,
-            select_letra_name: letra,
-            input_num_name: numero,
-            select_periodo_name: periodo,
-            "__ASYNCPOST": "true",
-            btn_buscar_name: "Buscar"
-        }
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(4000)
 
-        # E. Enviar la llamada AJAX
-        r_post = session.post(URL_BASE, data=payload, headers=headers_ajax, timeout=25)
-        html_respuesta = r_post.text
+        # Diagnóstico: Imprimir fragmento del contenido obtenido
+        texto_pagina = frame_target.inner_text("body")
+        print("   --- 📋 FRAGMENTO DEL TEXTO EN PÁGINA ---")
+        lineas = [l.strip() for l in texto_pagina.split("\n") if l.strip()]
+        for l in lineas[:12]: # Muestra las primeras 12 líneas reales del DOM
+            print(f"   | {l}")
+        print("   ----------------------------------------")
 
-        soup_post = BeautifulSoup(html_respuesta, "html.parser")
+        # Parsear tabla de resultados
+        filas_grid = frame_target.locator("table tr").all()
+        
+        objeto, autor, comision, estado = None, None, None, None
 
-        # F. Extraer datos del resultado
-        objeto = None
-        autor = None
-        comision = None
-        estado = None
+        if len(filas_grid) > 1:
+            for fila in filas_grid:
+                txt_row = fila.inner_text()
+                if numero in txt_row or letra in txt_row or "Objeto" in txt_row or len(txt_row) > 30:
+                    celdas = [c.strip() for c in txt_row.split("\t") if c.strip()]
+                    if len(celdas) >= 2:
+                        objeto = celdas[1] if len(celdas) > 1 else None
+                        autor = celdas[2] if len(celdas) > 2 else None
+                        comision = celdas[3] if len(celdas) > 3 else None
+                        estado = celdas[4] if len(celdas) > 4 else None
+                        break
 
-        # Parsear todas las tablas generadas
-        tablas = soup_post.find_all("table")
-        for tabla in tablas:
-            filas = tabla.find_all("tr")
-            if len(filas) > 1:
-                # Si es una grilla horizontal
-                headers_tabla = [h.get_text(strip=True).upper() for h in filas[0].find_all(["td", "th"])]
-                datos_fila = [c.get_text(strip=True) for c in filas[1].find_all("td")]
-                
-                if len(datos_fila) >= 2:
-                    for i, head in enumerate(headers_tabla):
-                        if i < len(datos_fila):
-                            val = datos_fila[i]
-                            if "OBJETO" in head or "SUMARIO" in head or "CARÁTULA" in head:
-                                objeto = val
-                            elif "AUTOR" in head or "INICIADOR" in head:
-                                autor = val
-                            elif "COMISIÓN" in head:
-                                comision = val
-                            elif "ESTADO" in head:
-                                estado = val
-
-        # Fallback de búsqueda Regex en el bloque delta de respuesta si no vino como tabla estándar
-        if not objeto:
-            m_obj = re.search(r'(?:Objeto|Sumario|Carátula)[:\s]+([^\r\n\|<]+)', html_respuesta, re.IGNORECASE)
-            if m_obj:
-                objeto = m_obj.group(1).strip()
-
-            m_aut = re.search(r'(?:Autor|Iniciador)[:\s]+([^\r\n\|<]+)', html_respuesta, re.IGNORECASE)
-            if m_aut:
-                autor = m_aut.group(1).strip()
-
-            m_est = re.search(r'(?:Estado|Situación)[:\s]+([^\r\n\|<]+)', html_respuesta, re.IGNORECASE)
-            if m_est:
-                estado = m_est.group(1).strip()
-
-        if "No se encontraron" in html_respuesta or "Sin registros" in html_respuesta:
-            print("   ⚠️ No existen registros para este expediente en el Senado.")
-            return None
-
-        objeto = objeto if objeto else "Ver ficha en el portal del Senado"
+        objeto = objeto if objeto else "Ver ficha en portal"
         autor = autor if autor else "Sin datos"
         bloque = "Sin datos"
         com_origen = comision if comision else "Sin asignación"
         est_origen = estado if estado else "En Estudio"
         com_revisora = "N/A"
         est_revisora = "N/A"
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in html_respuesta.upper() else "No"
+        media_sancion = "Sí" if "MEDIA SANCIÓN" in texto_pagina.upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print(f"   ✔ Extraído REAL: Objeto='{objeto[:40]}...', Autor='{autor}', Estado='{est_origen}'")
+        print(f"   ✔ Resultado obtenido: Objeto='{objeto[:35]}...', Estado='{est_origen}'")
 
         return [
             exp_str,
@@ -218,14 +182,26 @@ sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
 cont_agregados = 0
-session = requests.Session()
 
-for exp in expedientes_origen:
-    if exp.strip():
-        datos = extraer_datos_expediente(session, exp)
-        if datos:
-            sheet_consolidado.append_row(datos)
-            cont_agregados += 1
-            print("   💾 Fila guardada correctamente en Google Sheets.")
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-setuid-sandbox"]
+    )
+    context = browser.new_context(
+        viewport={"width": 1366, "height": 768},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    )
+    page = context.new_page()
 
-print(f"\n🎉 ¡Proceso finalizado! Se procesaron {cont_agregados} expedientes reales.")
+    for exp in expedientes_origen:
+        if exp.strip():
+            datos = extraer_datos_expediente(page, exp)
+            if datos:
+                sheet_consolidado.append_row(datos)
+                cont_agregados += 1
+                print("   💾 Fila guardada correctamente en Google Sheets.")
+
+    browser.close()
+
+print(f"\n🎉 Proceso finalizado. Total procesados: {cont_agregados}")
