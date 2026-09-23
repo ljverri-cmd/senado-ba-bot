@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (VERSIÓN DEFINITIVA) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (NAVEGACIÓN NATIVA) ---")
 
 # 1. Autenticación y conexión con Google Sheets
 try:
@@ -50,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Función de consulta optimizada
+# 2. Función de búsqueda con interacción nativa
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -63,81 +63,63 @@ def extraer_datos_expediente(page, expediente):
     numero = match.group(2)
     periodo_raw = match.group(3)
 
-    # Extraer el año base (ej: si es "25-26" o "2025-2026", el año base es "2025")
     p1 = periodo_raw.split("-")[0].strip()
     p1_full = f"20{p1}" if len(p1) == 2 else p1
 
-    print(f"\n🔎 Buscando en Senado PBA -> Letra: '{letra}', Nro: '{numero}', Año base: '{p1_full}'")
+    print(f"\n🔎 Buscando en Senado PBA -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo_raw}'")
 
     try:
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(2000)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(1500)
 
-        # 1. Cambiar explícitamente a la pestaña "PROYECTOS" si existe el botón
-        try:
-            btn_proyectos = page.locator("input[value*='PROYECTOS'], button:has-text('PROYECTOS'), a:has-text('PROYECTOS')").first
-            if btn_proyectos.is_visible():
-                btn_proyectos.click(force=True, timeout=3000)
-                page.wait_for_timeout(1000)
-        except Exception:
-            pass
+        # 1. Asegurar pestaña "PROYECTOS"
+        tab_proyectos = page.locator("a:has-text('PROYECTOS'), [id*='btnProyectos'], input[value*='PROYECTOS']").first
+        if tab_proyectos.is_visible():
+            tab_proyectos.click()
+            page.wait_for_timeout(1500)
 
-        # 2. Inyección de datos mediante JS evitando bloqueos por controles ocultos
-        page.evaluate(f"""() => {{
-            // Seleccionar Letra
-            const ddlLetra = document.querySelector("select[id*='ddlLetrasExpedientes'], select[name*='ddlLetras'], select[id*='ddlLetra']");
-            if (ddlLetra) {{
-                for (let opt of ddlLetra.options) {{
-                    if (opt.text.trim().startsWith('{letra}') || opt.value === '{letra}') {{
-                        ddlLetra.value = opt.value;
-                        ddlLetra.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        break;
-                    }}
-                }}
-            }}
+        # 2. Seleccionar Letra/Tipo usando Playwright nativo
+        ddl_letra = page.locator("select[id*='ddlLetrasExpedientes'], select[id*='ddlLetra']").first
+        if ddl_letra.is_visible():
+            # Buscar la opción correspondiente por valor o texto
+            opciones = ddl_letra.locator("option").all_inner_texts()
+            opcion_match = next((opt for opt in opciones if opt.strip().startswith(letra)), None)
+            if opcion_match:
+                ddl_letra.select_option(label=opcion_match)
+            else:
+                ddl_letra.select_option(value=letra)
+            page.wait_for_timeout(500)
 
-            // Inserción del Número
-            const txtNum = document.querySelector("input[id*='txtNumeroExpediente'], input[name*='txtNumero']");
-            if (txtNum) {{
-                txtNum.value = '{numero}';
-                txtNum.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            }}
+        # 3. Ingresar el Número
+        input_num = page.locator("input[id*='txtNumeroExpediente'], input[id*='txtNumero']").first
+        if input_num.is_visible():
+            input_num.fill("")
+            input_num.type(numero)
 
-            // Seleccionar Período flexible por año base
-            const ddlPeriodo = document.querySelector("select[id*='ddlPeriodo'], select[name*='ddlPeriodo']");
-            if (ddlPeriodo) {{
-                for (let opt of ddlPeriodo.options) {{
-                    if (opt.text.includes('{p1_full}') || opt.value.includes('{p1_full}')) {{
-                        ddlPeriodo.value = opt.value;
-                        ddlPeriodo.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        break;
-                    }}
-                }}
-            }}
-        }}""")
+        # 4. Seleccionar el Período
+        ddl_periodo = page.locator("select[id*='ddlPeriodo']").first
+        if ddl_periodo.is_visible():
+            opciones_p = ddl_periodo.locator("option").all_inner_texts()
+            
+            # Buscar coincidencia (ej: "2024 - 2025" o "2024")
+            opcion_p_match = next((opt for opt in opciones_p if p1_full in opt or periodo_raw in opt), None)
+            if opcion_p_match:
+                ddl_periodo.select_option(label=opcion_p_match)
+            page.wait_for_timeout(500)
 
-        page.wait_for_timeout(500)
-
-        # 3. Hacer clic en el botón de búsqueda
-        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[id*='btnBuscar'], button:has-text('Buscar')").first
-        if btn_buscar.count() > 0:
-            btn_buscar.click(force=True, timeout=5000)
-        else:
-            page.evaluate("() => { const b = document.querySelector(\"input[type='submit']\"); if(b) b.click(); }")
-
-        # Esperar a que AJAX refresque la tabla
+        # 5. Clic en Buscar
+        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[id*='btnBuscar']").first
+        btn_buscar.click()
+        
+        # Esperar la recarga AJAX/DOM
         page.wait_for_timeout(4000)
 
-        # 4. Extraer información filtrando elementos institucionales/footer
+        # 6. Extraer resultados
         objeto, autor, comision, estado = None, None, None, None
 
-        filas = page.locator("table.grid-view tr, table[id*='Grid'] tr, div[id*='Resultado'] table tr").all()
-        if len(filas) == 0:
-            filas = page.locator("table tr").all()
-
+        filas = page.locator("table tr").all()
         for f in filas:
             txt = f.inner_text().strip()
-            # Omitir el pie de página institucional de La Plata
             if "Calle 51" in txt or "Honorable Senado" in txt or "Teléfono" in txt:
                 continue
 
@@ -153,7 +135,6 @@ def extraer_datos_expediente(page, expediente):
                     elif any(est in celda for est in ["En Estudio", "Aprobado", "Sancionado", "Archivado", "Giro"]) and not estado:
                         estado = celda
 
-        # Fallback si el resultado viene en contenedores de texto
         if not objeto:
             elementos_texto = page.locator("div[id*='ContentPlaceHolder'], div[id*='UpdatePanel']").all_inner_texts()
             for bloque in elementos_texto:
@@ -198,7 +179,7 @@ def extraer_datos_expediente(page, expediente):
         print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Bucle principal de ejecución
+# 3. Bucle de ejecución
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
