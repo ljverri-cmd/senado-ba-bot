@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (VERSIÓN OPTIMIZADA) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (FORZADO DE CONTROLES OCULTOS) ---")
 
 # 1. Autenticación y conexión con Google Sheets
 try:
@@ -50,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Función de consulta con selectores directos
+# 2. Función de consulta con JS e interacción forzada
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -63,7 +63,6 @@ def extraer_datos_expediente(page, expediente):
     numero = match.group(2)
     periodo_raw = match.group(3)
 
-    # Formatear el período para que coincida con el desplegable (ej. 2025 - 2026)
     if "-" in periodo_raw:
         partes = periodo_raw.split("-")
         p1 = partes[0].strip()
@@ -80,47 +79,54 @@ def extraer_datos_expediente(page, expediente):
 
     try:
         page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1500)
 
-        # Tratar de hacer clic en la solapa "Proyectos" si está visible y no causa timeout
-        try:
-            tab_proyectos = page.locator("#ctl00_ContentPlaceHolder1_btnProyectos, a[href*='Proyectos']").first
-            if tab_proyectos.is_visible():
-                tab_proyectos.click(timeout=5000)
-                page.wait_for_timeout(1000)
-        except Exception:
-            pass # Si no interactúa, los campos de entrada igual están accesibles en la página
+        # Inyección directa por JS para saltar controles de visibilidad CSS
+        page.evaluate(f"""() => {{
+            // Asignar Letra
+            const ddlLetra = document.querySelector("select[id*='ddlLetrasExpedientes'], select[name*='ddlLetras']");
+            if (ddlLetra) {{
+                for (let option of ddlLetra.options) {{
+                    if (option.text.trim().startsWith('{letra}') || option.value === '{letra}') {{
+                        ddlLetra.value = option.value;
+                        ddlLetra.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        break;
+                    }}
+                }}
+            }}
 
-        # 1. Seleccionar la Letra / Tipo
-        select_letra = page.locator("select[name*='ddlLetra'], select[name*='ddlTipo'], select[id*='ddl']").first
-        if select_letra.count() > 0:
-            options = select_letra.locator("option").all_inner_texts()
-            for opt in options:
-                if opt.strip().startswith(letra) or f"({letra})" in opt or opt.strip() == letra:
-                    select_letra.select_option(label=opt)
-                    break
+            // Asignar Número
+            const txtNum = document.querySelector("input[id*='txtNumeroExpediente'], input[name*='txtNumero']");
+            if (txtNum) {{
+                txtNum.value = '{numero}';
+                txtNum.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            }}
 
-        # 2. Inserción del Número de Expediente
-        input_num = page.locator("input[name*='txtNumero'], input[id*='txtNumero']").first
-        if input_num.count() > 0:
-            input_num.fill(numero)
+            // Asignar Período
+            const ddlPeriodo = document.querySelector("select[id*='ddlPeriodo'], select[name*='ddlPeriodo']");
+            if (ddlPeriodo) {{
+                for (let option of ddlPeriodo.options) {{
+                    if (option.text.includes('{p1}') || option.value.includes('{p1}')) {{
+                        ddlPeriodo.value = option.value;
+                        ddlPeriodo.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        break;
+                    }}
+                }}
+            }}
+        }}""")
 
-        # 3. Selección del Período
-        select_periodo = page.locator("select[name*='ddlPeriodo'], select[id*='ddlPeriodo']").first
-        if select_periodo.count() > 0:
-            options_p = select_periodo.locator("option").all_inner_texts()
-            for opt in options_p:
-                if (p1 in opt if 'p1' in locals() else periodo_fmt in opt):
-                    select_periodo.select_option(label=opt)
-                    break
+        page.wait_for_timeout(500)
 
-        # 4. Click en Buscar
-        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[name*='btnBuscar'], button:has-text('Buscar')").first
-        btn_buscar.click()
+        # Forzar clic en el botón de búsqueda
+        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[id*='btnBuscar'], button:has-text('Buscar')").first
+        if btn_buscar.count() > 0:
+            btn_buscar.click(force=True, timeout=5000)
+        else:
+            page.evaluate("() => { const b = document.querySelector(\"input[type='submit']\"); if(b) b.click(); }")
 
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(3500)
 
-        # 5. Extracción de resultados
+        # Parsear tabla / grilla
         filas = page.locator("table tr").all()
         objeto, autor, comision, estado = None, None, None, None
 
@@ -132,24 +138,23 @@ def extraer_datos_expediente(page, expediente):
                     for celda in celdas:
                         if len(celda) > 20 and not objeto:
                             objeto = celda
-                        elif any(tit in celda for tit in ["Senador", "Diputado", "Bloque", "P.E.", "P.E"]) and not autor:
+                        elif any(tit in celda for tit in ["Senador", "Diputado", "Bloque", "P.E."]) and not autor:
                             autor = celda
                         elif "Comisión" in celda and not comision:
                             comision = celda
                         elif any(est in celda for est in ["En Estudio", "Aprobado", "Sancionado", "Archivado", "Giro"]) and not estado:
                             estado = celda
 
-        # Fallback si los datos están estructurados como bloques de texto
         if not objeto:
             body_text = page.locator("body").inner_text()
             lineas = [l.strip() for l in body_text.split("\n") if len(l.strip()) > 20]
             for l in lineas:
-                if numero in l or letra in l:
+                if numero in l:
                     objeto = l
                     break
 
         if not objeto:
-            print("   ⚠️ No se obtuvo respuesta para el expediente especificado.")
+            print("   ⚠️ No se encontró respuesta para este expediente.")
             return None
 
         objeto = objeto if objeto else "Proyecto registrado"
@@ -162,7 +167,7 @@ def extraer_datos_expediente(page, expediente):
         media_sancion = "Sí" if "MEDIA SANCIÓN" in page.inner_text("body").upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print(f"   ✔ ¡DATOS ENCONTRADOS!: {objeto[:50]}...")
+        print(f"   ✔ ¡DATOS EXTRAÍDOS!: {objeto[:45]}...")
 
         return [
             exp_str,
@@ -204,8 +209,8 @@ with sync_playwright() as p:
             if datos:
                 sheet_consolidado.append_row(datos)
                 cont_agregados += 1
-                print("   💾 Registrado en Google Sheets.")
+                print("   💾 Fila registrada en Google Sheets.")
 
     browser.close()
 
-print(f"\n🎉 Proceso finalizado. Registros guardados: {cont_agregados}")
+print(f"\n🎉 Proceso finalizado. Total guardados: {cont_agregados}")
