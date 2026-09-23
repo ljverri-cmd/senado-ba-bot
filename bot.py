@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (BÚSQUEDA EXACTA DE PROYECTOS) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (VERSIÓN OPTIMIZADA) ---")
 
 # 1. Autenticación y conexión con Google Sheets
 try:
@@ -50,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Función de consulta con selectores exactos del Senado PBA
+# 2. Función de consulta con selectores directos
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -63,7 +63,7 @@ def extraer_datos_expediente(page, expediente):
     numero = match.group(2)
     periodo_raw = match.group(3)
 
-    # Formatear el período exactamente como figura en los desplegables del Senado: "2024 - 2025"
+    # Formatear el período para que coincida con el desplegable (ej. 2025 - 2026)
     if "-" in periodo_raw:
         partes = periodo_raw.split("-")
         p1 = partes[0].strip()
@@ -74,23 +74,25 @@ def extraer_datos_expediente(page, expediente):
             p2 = f"20{p2}"
         periodo_fmt = f"{p1} - {p2}"
     else:
-        periodo_fmt = periodo_raw
+        periodo_fmt = periodo_raw if len(periodo_raw) == 4 else f"20{periodo_raw}"
 
     print(f"\n🔎 Buscando en Senado PBA -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo_fmt}'")
 
     try:
-        # Navegar a la web oficial
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(2000)
 
-        # Seleccionar la pestaña "Proyectos" (por defecto entra en "Leyes")
-        tab_proyectos = page.locator("a:has-text('Proyectos'), tab:has-text('Proyectos'), .nav-tabs a").filter(has_text=re.compile(r"Proyectos", re.I))
-        if tab_proyectos.count() > 0:
-            tab_proyectos.first.click()
-            page.wait_for_timeout(1500)
+        # Tratar de hacer clic en la solapa "Proyectos" si está visible y no causa timeout
+        try:
+            tab_proyectos = page.locator("#ctl00_ContentPlaceHolder1_btnProyectos, a[href*='Proyectos']").first
+            if tab_proyectos.is_visible():
+                tab_proyectos.click(timeout=5000)
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass # Si no interactúa, los campos de entrada igual están accesibles en la página
 
-        # Completar Letra (E, D, F, PE, etc.)
-        select_letra = page.locator("select[id*='ddlLetra'], select[id*='ddlTipo']").first
+        # 1. Seleccionar la Letra / Tipo
+        select_letra = page.locator("select[name*='ddlLetra'], select[name*='ddlTipo'], select[id*='ddl']").first
         if select_letra.count() > 0:
             options = select_letra.locator("option").all_inner_texts()
             for opt in options:
@@ -98,67 +100,59 @@ def extraer_datos_expediente(page, expediente):
                     select_letra.select_option(label=opt)
                     break
 
-        # Completar Número de Expediente
-        input_num = page.locator("input[id*='txtNumero']").first
-        input_num.fill("")
-        input_num.fill(numero)
+        # 2. Inserción del Número de Expediente
+        input_num = page.locator("input[name*='txtNumero'], input[id*='txtNumero']").first
+        if input_num.count() > 0:
+            input_num.fill(numero)
 
-        # Seleccionar Período (ej: "2024 - 2025")
-        select_periodo = page.locator("select[id*='ddlPeriodo']").first
+        # 3. Selección del Período
+        select_periodo = page.locator("select[name*='ddlPeriodo'], select[id*='ddlPeriodo']").first
         if select_periodo.count() > 0:
             options_p = select_periodo.locator("option").all_inner_texts()
-            match_opt = None
             for opt in options_p:
-                if p1 in opt and p2 in opt:
-                    match_opt = opt
+                if (p1 in opt if 'p1' in locals() else periodo_fmt in opt):
+                    select_periodo.select_option(label=opt)
                     break
-            if match_opt:
-                select_periodo.select_option(label=match_opt)
 
-        # Hacer Clic en el Botón "Buscar"
-        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[id*='btnBuscar'], button:has-text('Buscar')").first
+        # 4. Click en Buscar
+        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[name*='btnBuscar'], button:has-text('Buscar')").first
         btn_buscar.click()
 
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(3500)
+        page.wait_for_timeout(4000)
 
-        # Extraer filas de la grilla de resultados
+        # 5. Extracción de resultados
         filas = page.locator("table tr").all()
-        
         objeto, autor, comision, estado = None, None, None, None
 
         for f in filas:
             txt = f.inner_text()
-            # Si la fila contiene el número o letra del expediente buscado
-            if numero in txt and (letra in txt or "Ley" in txt or "Proyecto" in txt):
+            if numero in txt:
                 celdas = [c.strip() for c in txt.split("\t") if c.strip()]
                 if len(celdas) >= 2:
-                    for idx, celda in enumerate(celdas):
-                        if len(celda) > 25 and not objeto:
+                    for celda in celdas:
+                        if len(celda) > 20 and not objeto:
                             objeto = celda
-                        elif any(tit in celda for tit in ["Senador", "Diputado", "Bloque", "P.E."]) and not autor:
+                        elif any(tit in celda for tit in ["Senador", "Diputado", "Bloque", "P.E.", "P.E"]) and not autor:
                             autor = celda
                         elif "Comisión" in celda and not comision:
                             comision = celda
                         elif any(est in celda for est in ["En Estudio", "Aprobado", "Sancionado", "Archivado", "Giro"]) and not estado:
                             estado = celda
 
-        # Si no se parseó por columnas, realizar fallback de captura en el contenedor de resultados
+        # Fallback si los datos están estructurados como bloques de texto
         if not objeto:
-            contenedor_res = page.locator("div[id*='UpdatePanel'], div[id*='Resultado'], .grid-view").first
-            if contenedor_res.count() > 0:
-                txt_res = contenedor_res.inner_text()
-                lineas = [l.strip() for l in txt_res.split("\n") if len(l.strip()) > 15]
-                for line in lineas:
-                    if not any(k in line.upper() for k in ["EXPEDIENTE", "CARÁTULA", "BUSCAR", "PERÍODO", "LEGISLATIVA"]):
-                        objeto = line
-                        break
+            body_text = page.locator("body").inner_text()
+            lineas = [l.strip() for l in body_text.split("\n") if len(l.strip()) > 20]
+            for l in lineas:
+                if numero in l or letra in l:
+                    objeto = l
+                    break
 
         if not objeto:
-            print("   ⚠️ No se encontraron resultados o el expediente no está cargado en el período indicado.")
+            print("   ⚠️ No se obtuvo respuesta para el expediente especificado.")
             return None
 
-        objeto = objeto if objeto else "Proyecto registrado en portal oficial"
+        objeto = objeto if objeto else "Proyecto registrado"
         autor = autor if autor else "Sin datos"
         bloque = "Sin datos"
         com_origen = comision if comision else "Sin asignación"
@@ -168,7 +162,7 @@ def extraer_datos_expediente(page, expediente):
         media_sancion = "Sí" if "MEDIA SANCIÓN" in page.inner_text("body").upper() else "No"
         fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        print(f"   ✔ ¡DATOS EXTRAÍDOS!: Carátula='{objeto[:40]}...', Estado='{est_origen}'")
+        print(f"   ✔ ¡DATOS ENCONTRADOS!: {objeto[:50]}...")
 
         return [
             exp_str,
@@ -187,7 +181,7 @@ def extraer_datos_expediente(page, expediente):
         print(f"   ❌ Error procesando {exp_str}: {e}")
         return None
 
-# 3. Bucle de ejecución
+# 3. Ejecución principal
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -210,8 +204,8 @@ with sync_playwright() as p:
             if datos:
                 sheet_consolidado.append_row(datos)
                 cont_agregados += 1
-                print("   💾 Fila actualizada exitosamente en Google Sheets.")
+                print("   💾 Registrado en Google Sheets.")
 
     browser.close()
 
-print(f"\n🎉 Proceso finalizado. Total de expedientes guardados con datos reales: {cont_agregados}")
+print(f"\n🎉 Proceso finalizado. Registros guardados: {cont_agregados}")
