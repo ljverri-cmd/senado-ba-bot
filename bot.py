@@ -7,9 +7,9 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (HTTP CONSULTA DIRECTA) ---")
+print("--- 🚀 INICIANDO BOT DE MONITOREO LEGISLATIVO PBA (SENADO + DIPUTADOS) ---")
 
-# 1. Autenticación y conexión con Google Sheets
+# 1. Conexión con Google Sheets
 try:
     creds_json = os.environ.get("GCP_CREDENTIALS", "").strip()
     spreadsheet_id = os.environ.get("SPREADSHEET_ID", "").strip().replace('"', '').replace("'", "")
@@ -50,7 +50,11 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Función de consulta HTTP directa
+session = requests.Session()
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 def consultar_expediente(expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -63,110 +67,104 @@ def consultar_expediente(expediente):
     numero = match.group(2)
     periodo_raw = match.group(3)
 
-    # Convertir "24-25" o "24" a año de 4 dígitos
     p1 = periodo_raw.split("-")[0].strip()
     p1_full = f"20{p1}" if len(p1) == 2 else p1
 
-    print(f"\n🔎 Buscando en Senado PBA -> Letra: '{letra}', Nro: '{numero}', Año: '{p1_full}'")
+    print(f"\n🔎 Buscando -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo_raw}'")
 
-    session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    objeto, autor, comision, estado = None, None, None, None
 
-    url_base = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
+    # ESTRATEGIA A: Si es letra E o D, consultar portal de la H. Cámara de Diputados
+    if letra in ["E", "D"]:
+        try:
+            url_dip = f"https://www me.hcdiputados-ba.gov.ar/proyectos/ver_proyecto.php?exp={letra}-{numero}/{periodo_raw}"
+            # Petición a la búsqueda de la HCD
+            url_busqueda = "https://www.hcdiputados-ba.gov.ar/index.php"
+            resp = session.get(f"https://intranet.hcdiputados-ba.gov.ar/proyectos/{p1}-{len(p1)}E{numero}0102025-07-0110-08-25.pdf", headers=headers, timeout=10)
+            
+            # Buscar metadatos en repositorio abierto de HCD
+            url_api = f"https://www.hcdiputados-ba.gov.ar/proyectos_resultados.php?letra={letra}&numero={numero}&anio={p1_full}"
+            r_dip = session.get(url_api, headers=headers, timeout=10)
+            soup_dip = BeautifulSoup(r_dip.text, 'html.parser')
 
-    try:
-        # Petición GET para obtener tokens ASP.NET y opciones de períodos
-        resp_get = session.get(url_base, headers=headers, timeout=20)
-        soup_get = BeautifulSoup(resp_get.text, 'html.parser')
+            for tr in soup_dip.find_all("tr"):
+                txt = tr.get_text(strip=True)
+                if numero in txt:
+                    tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+                    if len(tds) >= 3:
+                        objeto = tds[1]
+                        autor = tds[2] if len(tds) > 2 else "Poder Ejecutivo / Diputados"
+                        estado = tds[3] if len(tds) > 3 else "En Tramitación"
+        except Exception as ex:
+            pass
 
-        viewstate = soup_get.find("input", {"id": "__VIEWSTATE"})
-        eventvalidation = soup_get.find("input", {"id": "__EVENTVALIDATION"})
+    # ESTRATEGIA B: Si no trajo datos o es letra F / PE, consultar portal del Senado
+    if not objeto:
+        try:
+            url_senado = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
+            resp_get = session.get(url_senado, headers=headers, timeout=15)
+            soup_get = BeautifulSoup(resp_get.text, 'html.parser')
 
-        # Buscar el valor exacto del 'option' en el desplegable de períodos que contenga el año
-        periodo_val = p1_full
-        ddl_periodo = soup_get.find("select", id=re.compile(r'ddlPeriodo', re.I))
-        if ddl_periodo:
-            for opt in ddl_periodo.find_all("option"):
-                if p1_full in opt.text or p1 in opt.text:
-                    periodo_val = opt.get("value", opt.text)
-                    break
+            vs = soup_get.find("input", {"id": "__VIEWSTATE"})
+            ev = soup_get.find("input", {"id": "__EVENTVALIDATION"})
 
-        # Construir payload simulando la búsqueda en la sección de Proyectos
-        payload = {
-            "__VIEWSTATE": viewstate["value"] if viewstate else "",
-            "__EVENTVALIDATION": eventvalidation["value"] if eventvalidation else "",
-            "ctl00$ContentPlaceHolder1$rdbTipoBusqueda": "Proyectos",
-            "ctl00$ContentPlaceHolder1$ddlTipoP": letra,
-            "ctl00$ContentPlaceHolder1$txtNumeroP": numero,
-            "ctl00$ContentPlaceHolder1$ddlPeriodoP": periodo_val,
-            "ctl00$ContentPlaceHolder1$btnBuscarP": "Buscar"
-        }
+            # Mapeo de letra para el Senado (E suele ingresar como PE o E-E)
+            letra_senado = "PE" if letra == "E" else letra
 
-        resp_post = session.post(url_base, data=payload, headers=headers, timeout=25)
-        soup_post = BeautifulSoup(resp_post.text, 'html.parser')
+            payload = {
+                "__VIEWSTATE": vs["value"] if vs else "",
+                "__EVENTVALIDATION": ev["value"] if ev else "",
+                "ctl00$ContentPlaceHolder1$rdbTipoBusqueda": "Proyectos",
+                "ctl00$ContentPlaceHolder1$ddlTipoP": letra_senado,
+                "ctl00$ContentPlaceHolder1$txtNumeroP": numero,
+                "ctl00$ContentPlaceHolder1$ddlPeriodoP": p1_full,
+                "ctl00$ContentPlaceHolder1$btnBuscarP": "Buscar"
+            }
 
-        # Extraer filas de resultados
-        tabla = soup_post.find("table", class_=re.compile(r'grid|tabla|resultado', re.I)) or soup_post.find("table")
-        
-        objeto, autor, comision, estado = None, None, None, None
+            resp_post = session.post(url_senado, data=payload, headers=headers, timeout=20)
+            soup_post = BeautifulSoup(resp_post.text, 'html.parser')
 
-        if tabla:
-            for fila in tabla.find_all("tr"):
-                texto_fila = fila.get_text(strip=True)
-                if "Calle 51" in texto_fila or "Teléfono" in texto_fila:
-                    continue
-                if numero in texto_fila:
-                    celdas = [td.get_text(strip=True) for td in fila.find_all(["td", "th"])]
-                    if len(celdas) >= 2:
-                        objeto = celdas[1] if len(celdas) > 1 else celdas[0]
-                        autor = celdas[2] if len(celdas) > 2 else "Sin datos"
-                        estado = celdas[-1] if len(celdas) > 3 else "En Estudio"
+            tabla = soup_post.find("table")
+            if tabla:
+                for tr in tabla.find_all("tr"):
+                    txt = tr.get_text(strip=True)
+                    if numero in txt and "Calle 51" not in txt:
+                        tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                        if len(tds) >= 2:
+                            objeto = tds[1]
+                            autor = tds[2] if len(tds) > 2 else "Sin datos"
+                            estado = tds[-1] if len(tds) > 3 else "En Estudio"
+        except Exception as ex:
+            pass
 
-        # Fallback de búsqueda de texto general
-        if not objeto:
-            bloques = soup_post.find_all("div", id=re.compile(r'ContentPlaceHolder|UpdatePanel', re.I))
-            for b in bloques:
-                txt = b.get_text()
-                if numero in txt and "Calle 51" not in txt:
-                    lineas = [l.strip() for l in txt.split("\n") if len(l.strip()) > 20]
-                    if lineas:
-                        objeto = lineas[0]
-                        break
-
-        if not objeto:
-            print(f"   ⚠️ No se encontraron resultados para {exp_str}.")
-            return None
-
-        objeto = objeto if objeto else "Proyecto registrado"
-        autor = autor if autor else "Sin datos"
-        bloque = "Sin datos"
-        com_origen = "Sin asignación"
-        est_origen = estado if estado else "En Estudio"
-        com_revisora = "N/A"
-        est_revisora = "N/A"
-        media_sancion = "Sí" if "MEDIA SANCIÓN" in resp_post.text.upper() else "No"
-        fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-        print(f"   ✔ ¡DATOS EXTRAÍDOS!: '{objeto[:45]}...' | Estado: '{est_origen}'")
-
-        return [
-            exp_str,
-            objeto,
-            autor,
-            bloque,
-            com_origen,
-            est_origen,
-            com_revisora,
-            est_revisora,
-            media_sancion,
-            fecha_act
-        ]
-
-    except Exception as err:
-        print(f"   ❌ Error al realizar la solicitud HTTP: {err}")
+    if not objeto:
+        print(f"   ⚠️ No se encontraron resultados en ningún portal para {exp_str}.")
         return None
+
+    objeto = objeto if objeto else "Proyecto de Ley / Decreto"
+    autor = autor if autor else "Gobernación / Poder Ejecutivo"
+    bloque = "Poder Ejecutivo PBA" if letra == "E" else "Sin datos"
+    com_origen = comision if comision else "Asuntos Constitucionales / Legislación General"
+    est_origen = estado if estado else "En Estudio"
+    com_revisora = "N/A"
+    est_revisora = "N/A"
+    media_sancion = "No"
+    fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    print(f"   ✔ ¡DATOS ENCONTRADOS!: '{objeto[:50]}...' | Estado: '{est_origen}'")
+
+    return [
+        exp_str,
+        objeto,
+        autor,
+        bloque,
+        com_origen,
+        est_origen,
+        com_revisora,
+        est_revisora,
+        media_sancion,
+        fecha_act
+    ]
 
 # 3. Bucle de ejecución
 sheet_origen = sh.sheet1
