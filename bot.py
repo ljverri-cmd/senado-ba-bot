@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT SENADO PBA (NAVEGACIÓN NATIVA) ---")
+print("--- 🚀 INICIANDO BOT SENADO PBA (ROBUSTO CONTRA TIMEOUTS) ---")
 
 # 1. Autenticación y conexión con Google Sheets
 try:
@@ -50,7 +50,7 @@ ENCABEZADOS = [
 if not sheet_consolidado.row_values(1):
     sheet_consolidado.append_row(ENCABEZADOS)
 
-# 2. Función de búsqueda con interacción nativa
+# 2. Función de búsqueda con fallback por Enter y manejo de timeouts
 def extraer_datos_expediente(page, expediente):
     exp_str = str(expediente).strip()
     match = re.search(r'([a-zA-Z]+)\s*[\-\/]?\s*(\d+)\s*[\-\/]?\s*([\d\-]+)', exp_str)
@@ -69,52 +69,49 @@ def extraer_datos_expediente(page, expediente):
     print(f"\n🔎 Buscando en Senado PBA -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo_raw}'")
 
     try:
-        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(1500)
+        # Cargar página con timeout reducido
+        page.goto("https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1000)
 
-        # 1. Asegurar pestaña "PROYECTOS"
-        tab_proyectos = page.locator("a:has-text('PROYECTOS'), [id*='btnProyectos'], input[value*='PROYECTOS']").first
-        if tab_proyectos.is_visible():
-            tab_proyectos.click()
-            page.wait_for_timeout(1500)
-
-        # 2. Seleccionar Letra/Tipo usando Playwright nativo
+        # 1. Completar Letra si el desplegable está presente
         ddl_letra = page.locator("select[id*='ddlLetrasExpedientes'], select[id*='ddlLetra']").first
-        if ddl_letra.is_visible():
-            # Buscar la opción correspondiente por valor o texto
-            opciones = ddl_letra.locator("option").all_inner_texts()
-            opcion_match = next((opt for opt in opciones if opt.strip().startswith(letra)), None)
-            if opcion_match:
-                ddl_letra.select_option(label=opcion_match)
-            else:
-                ddl_letra.select_option(value=letra)
-            page.wait_for_timeout(500)
+        if ddl_letra.count() > 0 and ddl_letra.is_visible():
+            try:
+                opciones = ddl_letra.locator("option").all_inner_texts()
+                opcion_match = next((opt for opt in opciones if opt.strip().startswith(letra)), None)
+                if opcion_match:
+                    ddl_letra.select_option(label=opcion_match, timeout=3000)
+                else:
+                    ddl_letra.select_option(value=letra, timeout=3000)
+            except Exception:
+                pass
 
-        # 3. Ingresar el Número
+        # 2. Completar Número
         input_num = page.locator("input[id*='txtNumeroExpediente'], input[id*='txtNumero']").first
-        if input_num.is_visible():
-            input_num.fill("")
-            input_num.type(numero)
+        if input_num.count() > 0 and input_num.is_visible():
+            input_num.fill(numero)
 
-        # 4. Seleccionar el Período
+        # 3. Completar Período
         ddl_periodo = page.locator("select[id*='ddlPeriodo']").first
-        if ddl_periodo.is_visible():
-            opciones_p = ddl_periodo.locator("option").all_inner_texts()
-            
-            # Buscar coincidencia (ej: "2024 - 2025" o "2024")
-            opcion_p_match = next((opt for opt in opciones_p if p1_full in opt or periodo_raw in opt), None)
-            if opcion_p_match:
-                ddl_periodo.select_option(label=opcion_p_match)
-            page.wait_for_timeout(500)
+        if ddl_periodo.count() > 0 and ddl_periodo.is_visible():
+            try:
+                opciones_p = ddl_periodo.locator("option").all_inner_texts()
+                opcion_p_match = next((opt for opt in opciones_p if p1_full in opt or periodo_raw in opt), None)
+                if opcion_p_match:
+                    ddl_periodo.select_option(label=opcion_p_match, timeout=3000)
+            except Exception:
+                pass
 
-        # 5. Clic en Buscar
-        btn_buscar = page.locator("input[type='submit'][value*='Buscar'], input[id*='btnBuscar']").first
-        btn_buscar.click()
+        # 4. Enviar formulario presionando Enter en la caja de texto (Evita trabarse con el clic en el botón)
+        if input_num.count() > 0 and input_num.is_visible():
+            input_num.press("Enter")
+        else:
+            page.keyboard.press("Enter")
         
-        # Esperar la recarga AJAX/DOM
-        page.wait_for_timeout(4000)
+        # Esperar la recarga
+        page.wait_for_timeout(3500)
 
-        # 6. Extraer resultados
+        # 5. Lectura de resultados
         objeto, autor, comision, estado = None, None, None, None
 
         filas = page.locator("table tr").all()
@@ -195,6 +192,9 @@ with sync_playwright() as p:
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = context.new_page()
+
+    # Configurar timeout predeterminado global de 10 segundos por acción para evitar esperas infinitas de 30s
+    page.set_default_timeout(10000)
 
     for exp in expedientes_origen:
         if exp.strip():
