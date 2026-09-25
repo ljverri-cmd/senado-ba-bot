@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 
-print("--- 🚀 INICIANDO BOT LEGISLATIVO PBA (DIPUTADOS + SENADO CON SOPORTE SUFIJO) ---")
+print("--- 🚀 INICIANDO BOT LEGISLATIVO PBA (DIPUTADOS Y SENADO CON ORIGEN PE) ---")
 
 # 1. Conexión con Google Sheets
 try:
@@ -53,7 +53,7 @@ if not sheet_consolidado.row_values(1):
 session = requests.Session()
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 }
 
 def consultar_expediente(expediente):
@@ -72,48 +72,48 @@ def consultar_expediente(expediente):
 
     objeto, autor, comision, estado = None, None, None, None
 
-    # ESTRATEGIA 1: Consulta directa a la H. Cámara de Diputados de PBA
-    # Formatos de prueba: "E-6/24-25", "E-6/24-25-0", "E-6/24-25- 0"
-    variaciones_exp = [
-        f"{letra}-{numero}/{periodo_raw}",
-        f"{letra}- {numero}/{periodo_raw}",
-        f"{letra}-{numero}/{periodo_raw}- 0",
-        f"{letra}-{numero}/{periodo_raw}-0"
-    ]
+    # ESTRATEGIA 1: Búsqueda en la Cámara de Diputados PBA (Orígenes: PE, D, E)
+    origenes_a_probar = ["PE  ", "PE", "D   ", "E   "] if letra in ["E", "PE"] else [f"{letra}   ", letra]
 
-    for exp_variacion in variaciones_exp:
+    for origen_val in origenes_a_probar:
         if objeto:
             break
         try:
-            # Petición al buscador unificado de la HCD
             url_hcd = "https://www.hcdiputados-ba.gov.ar/index.php"
             params_hcd = {
-                "page": "expedientes",
-                "busqueda": exp_variacion
+                "page": "proyectos",
+                "search": "proyecto",
+                "periodo": periodo_raw,
+                "origen": origen_val,
+                "numero": numero,
+                "alcance": "0"
             }
             resp_hcd = session.get(url_hcd, params=params_hcd, headers=headers, timeout=12)
             soup_hcd = BeautifulSoup(resp_hcd.text, 'html.parser')
 
-            # Parsear tablas o tarjetas de resultados
-            for tr in soup_hcd.find_all(["tr", "div"], class_=re.compile(r'expediente|resultado|item|fila', re.I)):
-                txt = tr.get_text(separator=" ", strip=True)
-                if numero in txt and (periodo_raw in txt or "24-25" in txt or "25-26" in txt):
-                    # Extraer carátula / objeto
-                    objeto = txt
-                    
-                    # Intentar aislar campos específicos del HTML
-                    bloque_obj = tr.find(class_=re.compile(r'objeto|caratula|sumario|titulo', re.I))
-                    if bloque_obj:
-                        objeto = bloque_obj.get_text(strip=True)
+            # Parsear el texto devuelto
+            texto_completo = soup_hcd.get_text(separator=" ", strip=True)
+            if "PROYECTO DE LEY" in texto_completo or "DECLARANDO" in texto_completo or numero in texto_completo:
+                # Buscar encabezado o resumen
+                for elemento in soup_hcd.find_all(["div", "td", "p", "span"]):
+                    txt = elemento.get_text(strip=True)
+                    if len(txt) > 30 and ("DECLARANDO" in txt or "MODIFICANDO" in txt or "SOLICITANDO" in txt or "ESTABLECIENDO" in txt or "CREANDO" in txt or "PROYECTO" in txt):
+                        objeto = txt
+                        break
+                
+                if not objeto and len(texto_completo) > 100:
+                    objeto = texto_completo[:200]
 
-                    bloque_estado = tr.find(class_=re.compile(r'estado|situacion', re.I))
-                    if bloque_estado:
-                        estado = bloque_estado.get_text(strip=True)
-                    break
+                # Buscar comisiones o movimientos en el HTML
+                for tr in soup_hcd.find_all("tr"):
+                    tr_txt = tr.get_text(strip=True)
+                    if "COMISIÓN" in tr_txt or "PRESUPUESTO" in tr_txt or "LEGISLACIÓN" in tr_txt or "ARCHIVOS" in tr_txt:
+                        estado = tr_txt
+                        break
         except Exception:
             pass
 
-    # ESTRATEGIA 2: Si es 'E' o 'PE', intentar en el Senado por si ya ingresó como revisión
+    # ESTRATEGIA 2: Si no trajo datos de HCD, consultar el portal del Senado PBA
     if not objeto:
         try:
             url_senado = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
@@ -157,11 +157,11 @@ def consultar_expediente(expediente):
         print(f"   ⚠️ No se encontraron resultados en ningún portal para {exp_str}.")
         return None
 
-    # Limpieza de texto extraído
+    # Limpieza de texto
     objeto_clean = re.sub(r'\s+', ' ', objeto)[:250]
-    autor = autor if autor else ("Poder Ejecutivo PBA" if letra == "E" else "Sin datos")
-    bloque = "Poder Ejecutivo PBA" if letra == "E" else "Sin datos"
-    com_origen = "Comisión de Asuntos Constitucionales / Legislación General"
+    autor = autor if autor else ("Poder Ejecutivo PBA" if letra in ["E", "PE"] else "Sin datos")
+    bloque = "Poder Ejecutivo PBA" if letra in ["E", "PE"] else "Sin datos"
+    com_origen = "Comisión de Asuntos Constitucionales / Presupuesto e Impuestos"
     est_origen = estado if estado else "En Tramitación / Comisión"
     com_revisora = "N/A"
     est_revisora = "N/A"
