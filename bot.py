@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 
-print("--- 🚀 INICIANDO BOT LEGISLATIVO PBA (DIPUTADOS Y SENADO CON ORIGEN PE) ---")
+print("--- 🚀 INICIANDO BOT LEGISLATIVO PBA (VERSIÓN ROBUSTA DE EXTRACCIÓN) ---")
 
 # 1. Conexión con Google Sheets
 try:
@@ -52,9 +52,24 @@ if not sheet_consolidado.row_values(1):
 
 session = requests.Session()
 headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 }
+
+# Palabras basura a descartar si el scraper las captura por error
+TEXTOS_INVALIDOS = [
+    "calle 51", "derechos reservados", "honorables senadores", 
+    "desarrollado por", "términos y condiciones", "iniciar sesión",
+    "cámara de senadores", "cámara de diputados"
+]
+
+def es_texto_valido(texto):
+    if not texto or len(texto.strip()) < 15:
+        return False
+    txt_lower = texto.lower()
+    for invalido in TEXTOS_INVALIDOS:
+        if invalido in txt_lower and "ley" not in txt_lower and "declarando" not in txt_lower:
+            return False
+    return True
 
 def consultar_expediente(expediente):
     exp_str = str(expediente).strip()
@@ -70,54 +85,31 @@ def consultar_expediente(expediente):
 
     print(f"\n🔎 Buscando -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo_raw}'")
 
-    objeto, autor, comision, estado = None, None, None, None
+    objeto, autor, estado = None, None, None
 
-    # ESTRATEGIA 1: Búsqueda en la Cámara de Diputados PBA (Orígenes: PE, D, E)
-    origenes_a_probar = ["PE  ", "PE", "D   ", "E   "] if letra in ["E", "PE"] else [f"{letra}   ", letra]
+    # ESTRATEGIA 1: Búsqueda en el portal de la H. Cámara de Diputados de PBA
+    try:
+        url_hcd = f"https://www.hcdiputados-ba.gov.ar/proyectos_resultados.php?letra={letra}&numero={numero}&periodo={periodo_raw}"
+        resp_hcd = session.get(url_hcd, headers=headers, timeout=10)
+        soup_hcd = BeautifulSoup(resp_hcd.text, 'html.parser')
 
-    for origen_val in origenes_a_probar:
-        if objeto:
-            break
-        try:
-            url_hcd = "https://www.hcdiputados-ba.gov.ar/index.php"
-            params_hcd = {
-                "page": "proyectos",
-                "search": "proyecto",
-                "periodo": periodo_raw,
-                "origen": origen_val,
-                "numero": numero,
-                "alcance": "0"
-            }
-            resp_hcd = session.get(url_hcd, params=params_hcd, headers=headers, timeout=12)
-            soup_hcd = BeautifulSoup(resp_hcd.text, 'html.parser')
+        for tr in soup_hcd.find_all("tr"):
+            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(tds) >= 2:
+                candidato_obj = tds[1] if len(tds) > 1 else tds[0]
+                if es_texto_valido(candidato_obj):
+                    objeto = candidato_obj
+                    autor = tds[2] if len(tds) > 2 else "Poder Ejecutivo"
+                    estado = tds[3] if len(tds) > 3 else "En Tramitación"
+                    break
+    except Exception as e:
+        print(f"   ⚠️ Fallo menor en consulta HCD: {e}")
 
-            # Parsear el texto devuelto
-            texto_completo = soup_hcd.get_text(separator=" ", strip=True)
-            if "PROYECTO DE LEY" in texto_completo or "DECLARANDO" in texto_completo or numero in texto_completo:
-                # Buscar encabezado o resumen
-                for elemento in soup_hcd.find_all(["div", "td", "p", "span"]):
-                    txt = elemento.get_text(strip=True)
-                    if len(txt) > 30 and ("DECLARANDO" in txt or "MODIFICANDO" in txt or "SOLICITANDO" in txt or "ESTABLECIENDO" in txt or "CREANDO" in txt or "PROYECTO" in txt):
-                        objeto = txt
-                        break
-                
-                if not objeto and len(texto_completo) > 100:
-                    objeto = texto_completo[:200]
-
-                # Buscar comisiones o movimientos en el HTML
-                for tr in soup_hcd.find_all("tr"):
-                    tr_txt = tr.get_text(strip=True)
-                    if "COMISIÓN" in tr_txt or "PRESUPUESTO" in tr_txt or "LEGISLACIÓN" in tr_txt or "ARCHIVOS" in tr_txt:
-                        estado = tr_txt
-                        break
-        except Exception:
-            pass
-
-    # ESTRATEGIA 2: Si no trajo datos de HCD, consultar el portal del Senado PBA
+    # ESTRATEGIA 2: Si no trajo resultados válidos de HCD, consultar el Senado
     if not objeto:
         try:
             url_senado = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
-            resp_get = session.get(url_senado, headers=headers, timeout=12)
+            resp_get = session.get(url_senado, headers=headers, timeout=10)
             soup_get = BeautifulSoup(resp_get.text, 'html.parser')
 
             vs = soup_get.find("input", {"id": "__VIEWSTATE"})
@@ -136,33 +128,32 @@ def consultar_expediente(expediente):
                 "ctl00$ContentPlaceHolder1$btnBuscarP": "Buscar"
             }
 
-            resp_post = session.post(url_senado, data=payload, headers=headers, timeout=15)
+            resp_post = session.post(url_senado, data=payload, headers=headers, timeout=12)
             soup_post = BeautifulSoup(resp_post.text, 'html.parser')
 
             tabla = soup_post.find("table")
             if tabla:
                 for tr in tabla.find_all("tr"):
-                    txt = tr.get_text(strip=True)
-                    if numero in txt and "Calle 51" not in txt:
-                        tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                        if len(tds) >= 2:
-                            objeto = tds[1]
+                    tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                    if len(tds) >= 3:
+                        candidato_obj = tds[1]
+                        if es_texto_valido(candidato_obj):
+                            objeto = candidato_obj
                             autor = tds[2] if len(tds) > 2 else "Poder Ejecutivo"
                             estado = tds[-1] if len(tds) > 3 else "En Estudio"
                             break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"   ⚠️ Fallo menor en consulta Senado: {e}")
 
     if not objeto:
-        print(f"   ⚠️ No se encontraron resultados en ningún portal para {exp_str}.")
+        print(f"   ⚠️ No se encontraron datos válidos para {exp_str}.")
         return None
 
-    # Limpieza de texto
     objeto_clean = re.sub(r'\s+', ' ', objeto)[:250]
-    autor = autor if autor else ("Poder Ejecutivo PBA" if letra in ["E", "PE"] else "Sin datos")
+    autor_clean = autor if autor else ("Poder Ejecutivo PBA" if letra in ["E", "PE"] else "Sin datos")
     bloque = "Poder Ejecutivo PBA" if letra in ["E", "PE"] else "Sin datos"
-    com_origen = "Comisión de Asuntos Constitucionales / Presupuesto e Impuestos"
-    est_origen = estado if estado else "En Tramitación / Comisión"
+    com_origen = "Asuntos Constitucionales / Legislación General"
+    est_origen = estado if estado else "En Tramitación"
     com_revisora = "N/A"
     est_revisora = "N/A"
     media_sancion = "No"
@@ -173,7 +164,7 @@ def consultar_expediente(expediente):
     return [
         exp_str,
         objeto_clean,
-        autor,
+        autor_clean,
         bloque,
         com_origen,
         est_origen,
@@ -183,7 +174,7 @@ def consultar_expediente(expediente):
         fecha_act
     ]
 
-# 3. Bucle de ejecución
+# 3. Bucle principal con protección contra caídas masivas
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -191,10 +182,13 @@ cont_agregados = 0
 
 for exp in expedientes_origen:
     if exp.strip():
-        datos = consultar_expediente(exp)
-        if datos:
-            sheet_consolidado.append_row(datos)
-            cont_agregados += 1
-            print("   💾 Fila guardada exitosamente en Google Sheets.")
+        try:
+            datos = consultar_expediente(exp)
+            if datos:
+                sheet_consolidado.append_row(datos)
+                cont_agregados += 1
+                print("   💾 Fila guardada exitosamente en Google Sheets.")
+        except Exception as err_fila:
+            print(f"   ❌ Error al procesar la fila '{exp}': {err_fila}. Continuando con el siguiente...")
 
 print(f"\n🎉 Proceso finalizado. Total guardados: {cont_agregados}")
