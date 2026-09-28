@@ -6,7 +6,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-print("--- 🚀 INICIANDO BOT LEGISLATIVO PBA CON PLAYWRIGHT (DIPUTADOS + SENADO) ---")
+print("--- 🚀 INICIANDO BOT LEGISLATIVO PBA (SOPORTE AVANZADO AJAX + NORMALIZACIÓN DE AÑOS) ---")
 
 # 1. Autenticación con Google Sheets
 try:
@@ -61,88 +61,126 @@ def consultar_expediente_playwright(page, expediente):
     numero = match.group(2)
     periodo_raw = match.group(3)
 
-    print(f"\n🔎 Buscando en la Web -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo_raw}'")
+    # Normalizar período a años completos de 4 dígitos
+    if "-" in periodo_raw:
+        p1, p2 = [p.strip() for p in periodo_raw.split("-")]
+        p1_full = f"20{p1}" if len(p1) == 2 else p1
+        p2_full = f"20{p2}" if len(p2) == 2 else p2
+        periodo_normalizado = f"{p1_full}-{p2_full}"
+        anio_inicio = p1_full
+    else:
+        anio_inicio = f"20{periodo_raw}" if len(periodo_raw) == 2 else periodo_raw
+        periodo_normalizado = anio_inicio
+
+    print(f"\n🔎 Buscando -> Letra: '{letra}', Nro: '{numero}', Período: '{periodo_raw}' (Año inicio: {anio_inicio})")
 
     objeto, autor, estado = None, "Poder Ejecutivo PBA", "En Tramitación"
 
-    # ESTRATEGIA 1: Consultar la Cámara de Diputados de PBA (Origen PE para letra E)
+    # ESTRATEGIA 1: Portal del Senado PBA con manipulación de DOM directa
     try:
-        origen_code = "PE" if letra in ["E", "PE"] else letra
-        url_hcd = f"https://www.hcdiputados-ba.gov.ar/index.php?page=proyectos&search=proyecto&periodo={periodo_raw}&origen={origen_code}%20%20&numero={numero}&alcance=0"
-        
-        page.goto(url_hcd, wait_until="domcontentloaded", timeout=20000)
+        url_senado = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
+        page.goto(url_senado, wait_until="domcontentloaded", timeout=25000)
         page.wait_for_timeout(2000)
 
-        body_text = page.inner_text("body")
+        # Inyectar y seleccionar los campos dinámicos
+        page.evaluate(f"""() => {{
+            // Seleccionar Solapa Proyectos si existe
+            const btnProy = Array.from(document.querySelectorAll('a, button, input')).find(el => el.textContent.includes('PROYECTOS') || el.value === 'Proyectos');
+            if (btnProy) btnProy.click();
+        }}""")
+        page.wait_for_timeout(1000)
 
-        if len(body_text) > 100 and ("PROYECTO" in body_text or "LEY" in body_text or "DECLARANDO" in body_text):
-            # Extraer párrafos descriptivos del DOM
-            elementos = page.locator("p, td, div.contenido, table").all()
-            for elem in elementos:
-                txt = elem.inner_text().strip()
-                if len(txt) > 30 and ("DECLARANDO" in txt or "MODIFICANDO" in txt or "ESTABLECIENDO" in txt or "CREANDO" in txt or "SOLICITANDO" in txt):
-                    objeto = txt.replace("\n", " ")
-                    break
+        # Seleccionar Tipo, Número y Año
+        page.evaluate(f"""() => {{
+            const letraBuscada = '{letra}' === 'E' ? 'PE' : '{letra}';
+            
+            // 1. Tipo / Letra
+            const selectTipo = document.querySelector("select[id*='ddlTipo'], select[id*='ddlLetra']");
+            if (selectTipo) {{
+                for (let opt of selectTipo.options) {{
+                    if (opt.text.trim().startsWith(letraBuscada) || opt.value.trim() === letraBuscada) {{
+                        selectTipo.value = opt.value;
+                        selectTipo.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        break;
+                    }}
+                }}
+            }}
 
-            # Buscar comisiones
-            for elem in elementos:
-                txt = elem.inner_text().strip()
-                if "COMISIÓN" in txt or "PRESUPUESTO" in txt or "LEGISLACIÓN" in txt:
-                    estado = txt.replace("\n", " ")
+            // 2. Número
+            const inputNum = document.querySelector("input[id*='txtNumero']");
+            if (inputNum) {{
+                inputNum.value = '{numero}';
+                inputNum.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            }}
+
+            // 3. Período / Año
+            const selectPeriodo = document.querySelector("select[id*='ddlPeriodo']");
+            if (selectPeriodo) {{
+                for (let opt of selectPeriodo.options) {{
+                    if (opt.text.includes('{anio_inicio}') || opt.value.includes('{anio_inicio}')) {{
+                        selectPeriodo.value = opt.value;
+                        selectPeriodo.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        break;
+                    }}
+                }}
+            }}
+        }}""")
+
+        page.wait_for_timeout(1000)
+
+        # Disparar búsqueda
+        btn_buscar = page.locator("input[id*='btnBuscar'], button[id*='btnBuscar'], input[value*='Buscar']").first
+        if btn_buscar.is_visible():
+            btn_buscar.click()
+            page.wait_for_timeout(4000)
+
+        # Extraer filas de la grilla de resultados
+        filas = page.locator("table tr").all()
+        for f in filas:
+            txt = f.inner_text().strip()
+            if numero in txt and "Calle 51" not in txt and "Honorable" not in txt:
+                celdas = [c.strip() for c in txt.split("\t") if c.strip()]
+                if len(celdas) >= 2:
+                    objeto = celdas[1] if len(celdas) > 1 else celdas[0]
+                    if len(celdas) > 2 and "Senador" in celdas[2]:
+                        autor = celdas[2]
+                    if len(celdas) > 3:
+                        estado = celdas[-1]
                     break
     except Exception as e:
-        print(f"   ⚠️ Error en consulta HCD: {e}")
+        print(f"   ⚠️ Intento en Senado no devolvió datos: {e}")
 
-    # ESTRATEGIA 2: Si no trajo resultados, navegar el portal del Senado
+    # ESTRATEGIA 2: Consulta directa a la H. Cámara de Diputados de PBA si no se encontró en Senado
     if not objeto:
         try:
-            url_senado = "https://legislativa.senado-ba.gov.ar/Leyes_y_proyectos.aspx"
-            page.goto(url_senado, wait_until="domcontentloaded", timeout=20000)
+            origen_code = "PE" if letra in ["E", "PE"] else letra
+            url_hcd = f"https://www.hcdiputados-ba.gov.ar/index.php?page=proyectos&search=proyecto&periodo={periodo_raw}&origen={origen_code}&numero={numero}&alcance=0"
+            
+            page.goto(url_hcd, wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(2000)
 
-            # Clic en la solapa de Proyectos
-            tab_p = page.locator("text=PROYECTOS").first
-            if tab_p.is_visible():
-                tab_p.click()
-                page.wait_for_timeout(1500)
+            # Buscar textos de extractos legislativos
+            elementos = page.locator("td, p, div, span").all()
+            for elem in elementos:
+                txt = elem.inner_text().strip()
+                if len(txt) > 35 and any(kw in txt for kw in ["DECLARANDO", "MODIFICANDO", "ESTABLECIENDO", "CREANDO", "SOLICITANDO", "PROYECTO DE LEY"]):
+                    objeto = txt
+                    break
 
-            # Completar formulario
-            tipo_sel = page.locator("select[id*='ddlTipoP'], select[id*='ddlLetra']").first
-            if tipo_sel.is_visible():
-                try:
-                    tipo_sel.select_option(value="PE" if letra == "E" else letra)
-                except Exception:
-                    tipo_sel.select_option(label="PE" if letra == "E" else letra)
-
-            num_in = page.locator("input[id*='txtNumeroP'], input[id*='txtNumero']").first
-            if num_in.is_visible():
-                num_in.fill(numero)
-
-            btn_bus = page.locator("input[id*='btnBuscarP'], input[value*='Buscar']").first
-            if btn_bus.is_visible():
-                btn_bus.click()
-                page.wait_for_timeout(3000)
-
-            # Extraer tabla de resultados
-            filas_tabla = page.locator("table tr").all()
-            for f in filas_tabla:
-                f_txt = f.inner_text().strip()
-                if numero in f_txt and "Calle 51" not in f_txt:
-                    celdas = f.locator("td, th").all_inner_texts()
-                    if len(celdas) >= 2:
-                        objeto = celdas[1].replace("\n", " ")
-                        if len(celdas) > 2:
-                            autor = celdas[2]
-                        if len(celdas) > 3:
-                            estado = celdas[-1]
-                        break
+            # Extraer comisiones / estado
+            for elem in elementos:
+                txt = elem.inner_text().strip()
+                if any(kw in txt for kw in ["COMISIÓN DE", "PRESUPUESTO", "ASUNTOS CONSTITUCIONALES", "LEGISLACIÓN GENERAL"]):
+                    estado = txt
+                    break
         except Exception as e:
-            print(f"   ⚠️ Error en consulta Senado: {e}")
+            print(f"   ⚠️ Intento en Diputados no devolvió datos: {e}")
 
     if not objeto:
-        print(f"   ⚠️ No se encontraron resultados en portales web para {exp_str}.")
+        print(f"   ⚠️ No se encontraron datos en la web oficial para {exp_str}.")
         return None
 
+    # Limpieza final del texto obtenido
     objeto_clean = re.sub(r'\s+', ' ', objeto)[:250]
     autor_clean = autor if autor else ("Poder Ejecutivo PBA" if letra in ["E", "PE"] else "Sin datos")
     bloque = "Poder Ejecutivo PBA" if letra in ["E", "PE"] else "Sin datos"
@@ -153,7 +191,7 @@ def consultar_expediente_playwright(page, expediente):
     media_sancion = "No"
     fecha_act = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    print(f"   ✔ ¡DATOS EXTRAÍDOS!: '{objeto_clean[:60]}...' | Estado: '{est_origen}'")
+    print(f"   ✔ ¡DATOS HALLADOS!: '{objeto_clean[:60]}...' | Estado: '{est_origen}'")
 
     return [
         exp_str,
@@ -168,7 +206,7 @@ def consultar_expediente_playwright(page, expediente):
         fecha_act
     ]
 
-# 3. Bucle Principal con Navegador Playwright Headless
+# 3. Bucle Principal
 sheet_origen = sh.sheet1
 expedientes_origen = sheet_origen.col_values(1)[1:]
 
@@ -177,6 +215,7 @@ cont_agregados = 0
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     context = browser.new_context(
+        viewport={"width": 1280, "height": 800},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = context.new_page()
@@ -190,7 +229,7 @@ with sync_playwright() as p:
                     cont_agregados += 1
                     print("   💾 Fila guardada exitosamente en Google Sheets.")
             except Exception as err_exp:
-                print(f"   ❌ Error al procesar '{exp}': {err_exp}. Continuando...")
+                print(f"   ❌ Error procesando '{exp}': {err_exp}. Continuando...")
 
     browser.close()
 
